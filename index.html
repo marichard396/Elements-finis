@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Analyse éléments finis 3D</title><meta name="theme-color" content="#0b0f14">
+<link rel="manifest" href="manifest.webmanifest"><link rel="icon" href="icon-192.png">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:#0b0f14;color:#e6edf3;font:13px/1.45 "Segoe UI",system-ui,-apple-system,Roboto,sans-serif;overflow:hidden}
+:root{--bg:#0b0f14;--panel:#0e131a;--card:#121821;--line:#232b36;--mut:#8b96a5;--acc:#e8734f;--ok:#3fb96a;--bad:#e5534b;--warn:#d9a53a}
+button,input,select{font:inherit;color:inherit}
+#app{display:grid;grid-template-columns:330px 1fr 290px;grid-template-rows:52px 1fr 26px;height:100%}
+#top{grid-column:1/4;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--bg)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;white-space:nowrap}
+.filetab{margin-left:8px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sp{flex:1}
+.btn{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 11px;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:#3a4554;background:#161d28}
+.btn:disabled{opacity:.45;cursor:default}
+.btn.primary{background:var(--acc);border-color:var(--acc);color:#16100d;font-weight:600}
+.btn.primary:hover{filter:brightness(1.08)}
+.btn.danger{color:#ff8a7a}
+.btn.wide{width:100%;padding:8px 11px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{background:var(--card);border:0;border-right:1px solid var(--line);padding:5px 11px;cursor:pointer}
+.seg button:last-child{border-right:0}
+.seg button:hover{background:#161d28}
+.seg button.on{background:#e6edf3;color:#0b0f14;font-weight:600}
+.seg.full{display:flex}.seg.full button{flex:1}
+.menu{position:relative}
+#viewMenu{display:none;position:absolute;right:0;top:34px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px;z-index:20;min-width:200px;box-shadow:0 8px 24px #0008}
+#viewMenu.open{display:block}
+#viewMenu label{display:flex;gap:8px;align-items:center;padding:4px 0;cursor:pointer}
+#left{border-right:1px solid var(--line);background:var(--panel);display:flex;flex-direction:column;min-height:0;margin:0 0 0 14px;border-left:1px solid var(--line)}
+#steps{display:flex;border-bottom:1px solid var(--line)}
+#steps button{flex:1;background:none;border:0;border-bottom:2px solid transparent;padding:9px 2px 7px;cursor:pointer;color:var(--mut);font-size:11px;display:flex;flex-direction:column;align-items:center;gap:5px}
+#steps button.on{color:#fff;font-weight:600;border-bottom-color:var(--acc)}
+.dot{width:16px;height:16px;border-radius:50%;border:1.5px solid #4a5665;display:grid;place-items:center;font-size:10px;line-height:1;color:#0b0f14}
+.dot.ok{background:var(--ok);border-color:var(--ok)}
+.dot.warn{background:var(--warn);border-color:var(--warn)}
+#panel{flex:1;overflow-y:auto;padding:14px 16px 18px}
+#panel::-webkit-scrollbar,#right::-webkit-scrollbar{width:8px}
+#panel::-webkit-scrollbar-thumb,#right::-webkit-scrollbar-thumb{background:#2a3340;border-radius:4px}
+.sec{font-size:11px;letter-spacing:.09em;color:var(--mut);font-weight:600;margin:18px 0 9px;padding-top:12px;border-top:1px solid var(--line);display:flex;gap:10px;align-items:center}
+.sec:first-child{margin-top:0;padding-top:0;border-top:0}
+.sec b{color:#e6edf3;font-family:ui-monospace,Consolas,monospace}
+.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:11px 12px;margin:8px 0}
+.card.active{border-color:#c9d1d9}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:7px 0}
+.row>span:first-child{color:#c5cfdb}
+.row .val{font-family:ui-monospace,Consolas,monospace;color:#fff;text-align:right}
+label.f{display:block;color:var(--mut);font-size:12px;margin:9px 0 4px}
+input[type=text],input[type=number],select{background:#0b1017;border:1px solid var(--line);border-radius:6px;padding:5px 8px;width:100%;outline:none}
+input:focus,select:focus{border-color:var(--acc)}
+.row input[type=number],.row select{width:118px;text-align:right}
+input[type=checkbox]{accent-color:var(--acc);width:14px;height:14px}
+input[type=range]{width:100%;accent-color:var(--acc)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0}
+.chip{font-family:ui-monospace,Consolas,monospace;font-size:12px;background:var(--card);border:1px solid var(--line);border-radius:5px;padding:3px 9px;cursor:pointer;display:flex;gap:7px;align-items:center}
+.chip:hover{border-color:#3a4554}.chip.on{border-color:#c9d1d9}
+.chip i{width:8px;height:8px;border-radius:50%;display:inline-block}
+.mut{color:var(--mut)}.small{font-size:12px}
+.chk{display:flex;gap:10px;align-items:flex-start;margin:7px 0}
+.chk i{flex:none;width:11px;height:11px;border-radius:50%;margin-top:4px;background:var(--ok)}
+.chk i.no{background:var(--bad)}.chk i.wn{background:var(--warn)}
+.btns{display:flex;flex-wrap:wrap;gap:7px;margin:9px 0}
+.verdict{border-radius:8px;padding:11px 12px;margin:8px 0;border:1px solid;font-weight:600}
+.verdict small{display:block;font-weight:400;margin-top:3px;color:#c5cfdb}
+.verdict.ok{border-color:#2d6b45;background:#12261b}.verdict.wn{border-color:#7a6226;background:#2a2312}.verdict.no{border-color:#7d302c;background:#2c1514}
+.tag{font-size:10px;font-weight:700;letter-spacing:.05em;color:var(--acc);background:#3a1f17;border-radius:3px;padding:1px 5px;margin-left:6px}
+#view{position:relative;min-width:0;min-height:0;background:#0b0f14}
+#view canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+#legend{position:absolute;left:12px;top:12px;width:232px;background:#10161ee6;border:1px solid var(--line);border-radius:8px;padding:10px 12px;font-size:12px;pointer-events:none}
+#legend .t{font-weight:600}#legend .t span{color:var(--mut);font-weight:400}
+#legend .bar{height:6px;border-radius:3px;margin:8px 0 4px;background:linear-gradient(90deg,#3b4cff,#28aae6,#3cc878,#f0d23c,#eb503c)}
+#legend .bar.rev{background:linear-gradient(90deg,#eb503c,#f0d23c,#3cc878,#28aae6,#3b4cff)}
+#legend .mm{display:flex;justify-content:space-between;font-family:ui-monospace,Consolas,monospace;color:var(--mut)}
+#legend .ln{display:flex;align-items:center;gap:8px;margin-top:6px}
+#legend .ln i{width:12px;height:3px;border-radius:2px;display:inline-block}
+#hint{position:absolute;right:14px;bottom:9px;color:var(--mut);font-size:12px;pointer-events:none}
+#prog{display:none;position:absolute;left:50%;bottom:44px;transform:translateX(-50%);background:#10161ef2;border:1px solid var(--line);border-radius:8px;padding:10px 14px;min-width:330px;align-items:center;gap:12px}
+#prog.on{display:flex}
+#prog .pb{height:4px;background:#232b36;border-radius:2px;margin-top:6px;overflow:hidden}
+#prog .pb i{display:block;height:100%;background:var(--acc);width:0}
+#empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:var(--mut);pointer-events:none}
+#empty div{max-width:380px}#empty b{display:block;color:#e6edf3;font-size:15px;margin-bottom:6px}
+#right{border-left:1px solid var(--line);background:var(--panel);padding:14px 16px;overflow-y:auto;margin-right:14px;border-right:1px solid var(--line)}
+kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;border:1px solid var(--line);border-radius:3px;padding:0 4px;background:var(--card)}
+#status{grid-column:1/4;display:flex;justify-content:space-between;align-items:center;padding:0 16px;color:var(--mut);font:12px ui-monospace,Consolas,monospace;border-top:1px solid var(--line)}
+#modal{display:none;position:fixed;inset:0;background:#000a;z-index:50;place-items:center}
+#modal.on{display:grid}
+#modal .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;max-width:640px;max-height:84vh;overflow:auto;padding:20px 24px}
+#modal h2{margin:0 0 10px;font-size:17px}#modal h3{margin:16px 0 4px;font-size:13px;color:var(--acc)}
+#modal p,#modal li{color:#c5cfdb;margin:4px 0}#modal ul,#modal ol{padding-left:20px;margin:4px 0}
+#toast{position:fixed;left:50%;top:64px;transform:translateX(-50%);background:#2c1514;border:1px solid #7d302c;border-radius:8px;padding:9px 14px;z-index:60;display:none;max-width:560px}
+#toast.on{display:block}#toast.info{background:#12261b;border-color:#2d6b45}
+</style></head><body>
+<div id="app">
+  <header id="top">
+    <div class="brand">
+      <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 1.5 18 6v8l-8 4.5L2 14V6z" fill="none" stroke="#e8734f" stroke-width="1.8" stroke-linejoin="round"/><path d="M2 6l8 4.5L18 6M10 10.5v8" fill="none" stroke="#e8734f" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      Analyse éléments finis 3D
+    </div>
+    <div class="filetab" id="fname">Sans titre</div>
+    <div class="sp"></div>
+    <button class="btn" data-act="open">Ouvrir…</button>
+    <button class="btn" data-act="save">Enregistrer</button>
+    <button class="btn primary" data-act="calc">Calculer</button>
+    <div class="seg" style="margin-left:8px">
+      <button data-view="iso">Iso</button><button data-view="front">Face</button><button data-view="right">Droite</button><button data-view="top">Dessus</button>
+    </div>
+    <button class="btn" data-act="fit">Ajuster</button>
+    <div class="menu">
+      <button class="btn" data-act="menu">Affichage ▾</button>
+      <div id="viewMenu">
+        <label><input type="checkbox" data-set="showEdges" checked> Arêtes du maillage</label>
+        <label><input type="checkbox" data-set="showGrid" checked> Grille au sol</label>
+        <label><input type="checkbox" data-set="showLabels" checked> Étiquettes des charges</label>
+      </div>
+    </div>
+    <button class="btn" data-act="help">Aide</button>
+  </header>
+  <aside id="left"><nav id="steps"></nav><div id="panel"></div></aside>
+  <main id="view">
+    <canvas id="gl"></canvas><canvas id="ov"></canvas>
+    <div id="empty"><div><b>Aucune pièce chargée</b>Glissez un fichier STL ici, ou utilisez « Importer un STL… » dans l'onglet Modèle. Vous pouvez aussi charger la pièce d'exemple.</div></div>
+    <div id="legend"></div>
+    <div id="prog"><div style="flex:1"><div id="progT"></div><div class="pb"><i id="progB"></i></div></div><button class="btn" data-act="stop">Arrêter</button></div>
+    <div id="hint">Clic gauche : tourner · Clic droit : déplacer · Molette : zoom</div>
+  </main>
+  <aside id="right"></aside>
+  <footer id="status"><span id="stL"></span><span id="stR"></span></footer>
+</div>
+<input type="file" id="file" accept=".stl,.json" hidden>
+<div id="modal"></div><div id="toast"></div>
+
+<script>
+'use strict';
+/* Moteur de calcul : STL, topologie de surface, voxelisation, éléments hexaédriques,
+   solveur gradient conjugué sans matrice, contraintes, optimisation topologique (SIMP). */
+const FEA = (function () {
+
+  /* ---------- STL ---------- */
+  function parseSTL(buf) {
+    const dv = new DataView(buf), len = buf.byteLength;
+    let bin = false;
+    if (len >= 84) { const n = dv.getUint32(80, true); if (84 + n * 50 === len) bin = true; }
+    if (!bin) {
+      const head = new TextDecoder().decode(new Uint8Array(buf, 0, Math.min(len, 4096)));
+      if (!/^\s*solid/i.test(head) || !/facet/i.test(head)) bin = len >= 84;
+    }
+    if (bin) {
+      const n = Math.min(dv.getUint32(80, true), Math.floor((len - 84) / 50));
+      const t = new Float32Array(n * 9);
+      for (let i = 0; i < n; i++) { const o = 84 + i * 50 + 12; for (let k = 0; k < 9; k++) t[i * 9 + k] = dv.getFloat32(o + k * 4, true); }
+      return t;
+    }
+    const txt = new TextDecoder().decode(buf), re = /vertex\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)\s+([-+0-9.eE]+)/g, a = [];
+    let m; while ((m = re.exec(txt))) a.push(+m[1], +m[2], +m[3]);
+    a.length -= a.length % 9;
+    return new Float32Array(a);
+  }
+
+  function geomInfo(tris) {
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    let vol = 0, area = 0;
+    for (let i = 0; i < tris.length; i += 9) {
+      for (let v = 0; v < 3; v++) for (let c = 0; c < 3; c++) { const x = tris[i + v * 3 + c]; if (x < mn[c]) mn[c] = x; if (x > mx[c]) mx[c] = x; }
+      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2], bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5], cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+      vol += (ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)) / 6;
+      const ux = bx - ax, uy = by - ay, uz = bz - az, vx = cx - ax, vy = cy - ay, vz = cz - az;
+      area += 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    }
+    return { min: mn, max: mx, size: [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]], volume: Math.abs(vol), area };
+  }
+
+  /* ---------- Topologie de surface (voisinage des triangles) ---------- */
+  function buildTopology(tris) {
+    const nt = tris.length / 9, gi = geomInfo(tris);
+    const diag = Math.hypot(gi.size[0], gi.size[1], gi.size[2]) || 1, inv = 1 / (diag * 1e-6);
+    const map = new Map(), vid = new Int32Array(nt * 3); let nv = 0;
+    for (let i = 0; i < nt * 3; i++) {
+      const key = Math.round(tris[i * 3] * inv) + ',' + Math.round(tris[i * 3 + 1] * inv) + ',' + Math.round(tris[i * 3 + 2] * inv);
+      let id = map.get(key); if (id === undefined) { id = nv++; map.set(key, id); } vid[i] = id;
+    }
+    const normals = new Float32Array(nt * 3), areas = new Float32Array(nt);
+    for (let t = 0; t < nt; t++) {
+      const i = t * 9, ux = tris[i + 3] - tris[i], uy = tris[i + 4] - tris[i + 1], uz = tris[i + 5] - tris[i + 2];
+      const vx = tris[i + 6] - tris[i], vy = tris[i + 7] - tris[i + 1], vz = tris[i + 8] - tris[i + 2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx, l = Math.hypot(nx, ny, nz);
+      areas[t] = l / 2; if (l > 0) { normals[t * 3] = nx / l; normals[t * 3 + 1] = ny / l; normals[t * 3 + 2] = nz / l; }
+    }
+    const adj = new Int32Array(nt * 3).fill(-1), em = new Map();
+    for (let t = 0; t < nt; t++) for (let e = 0; e < 3; e++) {
+      const a = vid[t * 3 + e], b = vid[t * 3 + (e + 1) % 3]; if (a === b) continue;
+      const key = a < b ? a * nv + b : b * nv + a, o = em.get(key);
+      if (o === undefined) em.set(key, t * 3 + e);
+      else if (o >= 0) { adj[t * 3 + e] = (o / 3) | 0; adj[o] = t; em.set(key, -1); }
+    }
+    return { nt, adj, normals, areas };
+  }
+
+  function flood(topo, seed, cosTol, toSeed) {
+    const { adj, normals: N } = topo, seen = new Uint8Array(topo.nt), out = [seed], st = [seed]; seen[seed] = 1;
+    while (st.length) {
+      const t = st.pop();
+      const r = toSeed ? seed : t;
+      for (let e = 0; e < 3; e++) {
+        const o = adj[t * 3 + e]; if (o < 0 || seen[o]) continue;
+        const d = N[r * 3] * N[o * 3] + N[r * 3 + 1] * N[o * 3 + 1] + N[r * 3 + 2] * N[o * 3 + 2];
+        if (d >= cosTol) { seen[o] = 1; out.push(o); st.push(o); }
+      }
+    }
+    return out;
+  }
+
+  /* mode : 'auto' | 'plane' | 'tangent' */
+  function selectRegion(topo, seed, mode, tolDeg) {
+    const cosP = Math.cos(2 * Math.PI / 180), cosT = Math.cos(tolDeg * Math.PI / 180);
+    if (mode === 'tangent') return flood(topo, seed, cosT, false);
+    const P = flood(topo, seed, cosP, true);
+    if (mode === 'plane' || P.length >= 3) return P;
+    const inP = new Set(P), N = topo.normals;
+    for (const t of P) for (let e = 0; e < 3; e++) {
+      const o = topo.adj[t * 3 + e]; if (o < 0 || inP.has(o)) continue;
+      const d = N[t * 3] * N[o * 3] + N[t * 3 + 1] * N[o * 3 + 1] + N[t * 3 + 2] * N[o * 3 + 2];
+      if (d >= cosT) return flood(topo, seed, cosT, false);
+    }
+    return P;
+  }
+
+  /* ---------- Voxelisation ---------- */
+  function voxelize(tris, h) {
+    const gi = geomInfo(tris);
+    const n = [0, 0, 0], o = [0, 0, 0];
+    for (let c = 0; c < 3; c++) { n[c] = Math.max(1, Math.ceil(gi.size[c] / h - 1e-6)); o[c] = (gi.min[c] + gi.max[c]) / 2 - n[c] * h / 2; }
+    const [nx, ny, nz] = n, [ox, oy, oz] = o;
+    const cols = new Array(nx * ny), px = h * 1.37e-4, py = h * 2.11e-4;
+    for (let i = 0; i < tris.length; i += 9) {
+      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2], bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5], cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+      const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+      if (Math.abs(d) < 1e-14) continue;
+      const i0 = Math.max(0, Math.ceil((Math.min(ax, bx, cx) - ox - px) / h - 0.5)), i1 = Math.min(nx - 1, Math.floor((Math.max(ax, bx, cx) - ox - px) / h - 0.5));
+      const j0 = Math.max(0, Math.ceil((Math.min(ay, by, cy) - oy - py) / h - 0.5)), j1 = Math.min(ny - 1, Math.floor((Math.max(ay, by, cy) - oy - py) / h - 0.5));
+      for (let j = j0; j <= j1; j++) {
+        const y = oy + (j + 0.5) * h + py;
+        for (let ii = i0; ii <= i1; ii++) {
+          const x = ox + (ii + 0.5) * h + px;
+          const u = ((x - ax) * (cy - ay) - (cx - ax) * (y - ay)) / d, v = ((bx - ax) * (y - ay) - (x - ax) * (by - ay)) / d;
+          if (u < 0 || v < 0 || u + v > 1) continue;
+          const c = ii + nx * j; (cols[c] || (cols[c] = [])).push(az + u * (bz - az) + v * (cz - az));
+        }
+      }
+    }
+    const inside = new Uint8Array(nx * ny * nz);
+    for (let c = 0; c < cols.length; c++) {
+      const a = cols[c]; if (!a) continue; a.sort((p, q) => p - q);
+      for (let m = 0; m + 1 < a.length; m += 2) {
+        const k0 = Math.max(0, Math.ceil((a[m] - oz) / h - 0.5)), k1 = Math.min(nz - 1, Math.floor((a[m + 1] - oz) / h - 0.5));
+        for (let k = k0; k <= k1; k++) inside[c + nx * ny * k] = 1;
+      }
+    }
+    /* ne garder que le plus gros bloc connecté par les faces */
+    const lab = new Int32Array(inside.length), stack = new Int32Array(inside.length); let best = 0, bestN = 0, nl = 0;
+    const sxy = nx * ny;
+    for (let s = 0; s < inside.length; s++) {
+      if (!inside[s] || lab[s]) continue;
+      const L = ++nl; let sp = 0, cnt = 0; stack[sp++] = s; lab[s] = L;
+      while (sp) {
+        const g = stack[--sp]; cnt++;
+        const i = g % nx, j = ((g / nx) | 0) % ny, k = (g / sxy) | 0;
+        if (i > 0 && inside[g - 1] && !lab[g - 1]) { lab[g - 1] = L; stack[sp++] = g - 1; }
+        if (i < nx - 1 && inside[g + 1] && !lab[g + 1]) { lab[g + 1] = L; stack[sp++] = g + 1; }
+        if (j > 0 && inside[g - nx] && !lab[g - nx]) { lab[g - nx] = L; stack[sp++] = g - nx; }
+        if (j < ny - 1 && inside[g + nx] && !lab[g + nx]) { lab[g + nx] = L; stack[sp++] = g + nx; }
+        if (k > 0 && inside[g - sxy] && !lab[g - sxy]) { lab[g - sxy] = L; stack[sp++] = g - sxy; }
+        if (k < nz - 1 && inside[g + sxy] && !lab[g + sxy]) { lab[g + sxy] = L; stack[sp++] = g + sxy; }
+      }
+      if (cnt > bestN) { bestN = cnt; best = L; }
+    }
+    for (let s = 0; s < inside.length; s++) inside[s] = lab[s] === best && best ? 1 : 0;
+    return { nx, ny, nz, h, ox, oy, oz, inside, count: bestN };
+  }
+
+  /* ---------- Maillage hexaédrique ---------- */
+  const FACE_L = [[0, 4, 6, 2], [1, 3, 7, 5], [0, 1, 5, 4], [2, 6, 7, 3], [0, 2, 3, 1], [4, 5, 7, 6]];
+  const FACE_N = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
+
+  function buildMesh(vox) {
+    const { nx, ny, nz, h, ox, oy, oz, inside } = vox, ne = vox.count;
+    const mx = nx + 1, my = ny + 1;
+    const nodeMap = new Int32Array(mx * my * (nz + 1)).fill(-1), elemOf = new Int32Array(nx * ny * nz).fill(-1);
+    const conn = new Int32Array(ne * 8), elemG = new Int32Array(ne); let e = 0, nn = 0;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const g = i + nx * (j + ny * k); if (!inside[g]) continue;
+      elemOf[g] = e; elemG[e] = g;
+      for (let l = 0; l < 8; l++) {
+        const gn = (i + (l & 1)) + mx * ((j + ((l >> 1) & 1)) + my * (k + ((l >> 2) & 1)));
+        if (nodeMap[gn] < 0) nodeMap[gn] = nn++;
+        conn[e * 8 + l] = nodeMap[gn];
+      }
+      e++;
+    }
+    const coords = new Float64Array(nn * 3);
+    for (let k = 0; k <= nz; k++) for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) {
+      const id = nodeMap[i + mx * (j + my * k)]; if (id < 0) continue;
+      coords[id * 3] = ox + i * h; coords[id * 3 + 1] = oy + j * h; coords[id * 3 + 2] = oz + k * h;
+    }
+    const mesh = { nx, ny, nz, h, ox, oy, oz, ne, nn, conn, coords, nodeMap, elemOf, elemG };
+    mesh.faces = extractFaces(mesh, null);
+    const na = new Float32Array(nn), q = mesh.faces.quads;
+    for (let i = 0; i < q.length; i++) na[q[i]] += 1;
+    mesh.nodeArea = na;
+    return mesh;
+  }
+
+  /* faces visibles : mask = Uint8Array par élément (null = tous) */
+  function extractFaces(mesh, mask) {
+    const { nx, ny, nz, ne, conn, elemOf, elemG } = mesh, sxy = nx * ny;
+    const quads = [], dir = [], elem = [];
+    for (let e = 0; e < ne; e++) {
+      if (mask && !mask[e]) continue;
+      const g = elemG[e], i = g % nx, j = ((g / nx) | 0) % ny, k = (g / sxy) | 0;
+      for (let d = 0; d < 6; d++) {
+        let o = -1;
+        if (d === 0) { if (i > 0) o = elemOf[g - 1]; } else if (d === 1) { if (i < nx - 1) o = elemOf[g + 1]; }
+        else if (d === 2) { if (j > 0) o = elemOf[g - nx]; } else if (d === 3) { if (j < ny - 1) o = elemOf[g + nx]; }
+        else if (d === 4) { if (k > 0) o = elemOf[g - sxy]; } else { if (k < nz - 1) o = elemOf[g + sxy]; }
+        if (o >= 0 && (!mask || mask[o])) continue;
+        const L = FACE_L[d]; quads.push(conn[e * 8 + L[0]], conn[e * 8 + L[1]], conn[e * 8 + L[2]], conn[e * 8 + L[3]]); dir.push(d); elem.push(e);
+      }
+    }
+    return { quads: Int32Array.from(quads), dir: Uint8Array.from(dir), elem: Int32Array.from(elem), n: dir.length };
+  }
+
+  /* matrice de rigidité d'un cube unité (E = 1, côté = 1) ; K réel = E·h·Ke */
+  function hexKe(nu) {
+    const K = new Float64Array(576), l = nu / ((1 + nu) * (1 - 2 * nu)), m = 1 / (2 * (1 + nu));
+    const D = [[l + 2 * m, l, l, 0, 0, 0], [l, l + 2 * m, l, 0, 0, 0], [l, l, l + 2 * m, 0, 0, 0], [0, 0, 0, m, 0, 0], [0, 0, 0, 0, m, 0], [0, 0, 0, 0, 0, m]];
+    const g = 1 / Math.sqrt(3), B = new Float64Array(144), DB = new Float64Array(144);
+    for (let gp = 0; gp < 8; gp++) {
+      const xi = (gp & 1 ? g : -g), et = ((gp >> 1) & 1 ? g : -g), ze = ((gp >> 2) & 1 ? g : -g);
+      B.fill(0);
+      for (let a = 0; a < 8; a++) {
+        const sx = (a & 1) * 2 - 1, sy = ((a >> 1) & 1) * 2 - 1, sz = ((a >> 2) & 1) * 2 - 1;
+        const dx = sx * (1 + et * sy) * (1 + ze * sz) / 4, dy = sy * (1 + xi * sx) * (1 + ze * sz) / 4, dz = sz * (1 + xi * sx) * (1 + et * sy) / 4;
+        const c = 3 * a;
+        B[c] = dx; B[24 + c + 1] = dy; B[48 + c + 2] = dz;
+        B[72 + c] = dy; B[72 + c + 1] = dx; B[96 + c + 1] = dz; B[96 + c + 2] = dy; B[120 + c] = dz; B[120 + c + 2] = dx;
+      }
+      for (let r = 0; r < 6; r++) for (let c = 0; c < 24; c++) { let s = 0; for (let q = 0; q < 6; q++) s += D[r][q] * B[q * 24 + c]; DB[r * 24 + c] = s; }
+      for (let i = 0; i < 24; i++) for (let j = 0; j < 24; j++) { let s = 0; for (let r = 0; r < 6; r++) s += B[r * 24 + i] * DB[r * 24 + j]; K[i * 24 + j] += s / 8; }
+    }
+    return K;
+  }
+
+  function matvec(mesh, Ke, scale, x, y) {
+    const { ne, conn } = mesh, ue = new Float64Array(24); y.fill(0);
+    for (let e = 0; e < ne; e++) {
+      const s = scale[e], b = e * 8;
+      for (let a = 0; a < 8; a++) { const n = conn[b + a] * 3, c = a * 3; ue[c] = x[n]; ue[c + 1] = x[n + 1]; ue[c + 2] = x[n + 2]; }
+      for (let a = 0; a < 8; a++) {
+        const n = conn[b + a] * 3;
+        for (let c = 0; c < 3; c++) {
+          const row = (a * 3 + c) * 24; let sum = 0;
+          for (let j = 0; j < 24; j++) sum += Ke[row + j] * ue[j];
+          y[n + c] += s * sum;
+        }
+      }
+    }
+  }
+
+  /* Gradient conjugué préconditionné (Jacobi). x contient les déplacements imposés (et un départ à chaud). */
+  async function pcg(o) {
+    const { mesh, Ke, scale, fixed, x, f } = o, tol = o.tol || 1e-6, maxIter = o.maxIter || 20000, tick = o.tick;
+    const n = mesh.nn * 3, r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), q = new Float64Array(n), M = new Float64Array(n);
+    const { ne, conn } = mesh;
+    for (let e = 0; e < ne; e++) for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) M[conn[e * 8 + a] * 3 + c] += scale[e] * Ke[(a * 3 + c) * 25];
+    for (let i = 0; i < n; i++) p[i] = fixed[i] ? x[i] : 0;
+    matvec(mesh, Ke, scale, p, q);
+    let bn = 0; for (let i = 0; i < n; i++) if (!fixed[i]) { const b = f[i] - q[i]; bn += b * b; }
+    bn = Math.sqrt(bn);
+    if (bn === 0) { for (let i = 0; i < n; i++) if (!fixed[i]) x[i] = 0; return { iter: 0, res: 0, converged: true }; }
+    matvec(mesh, Ke, scale, x, q);
+    let rz = 0, rr = 0;
+    for (let i = 0; i < n; i++) { r[i] = fixed[i] ? 0 : f[i] - q[i]; z[i] = M[i] > 0 ? r[i] / M[i] : 0; p[i] = z[i]; rz += r[i] * z[i]; rr += r[i] * r[i]; }
+    let res = Math.sqrt(rr) / bn, it = 0, last = Date.now();
+    while (res > tol && it < maxIter) {
+      matvec(mesh, Ke, scale, p, q);
+      let pq = 0; for (let i = 0; i < n; i++) { if (fixed[i]) q[i] = 0; pq += p[i] * q[i]; }
+      if (!(pq > 0)) return { iter: it, res, converged: false };
+      const al = rz / pq; let rz2 = 0; rr = 0;
+      for (let i = 0; i < n; i++) { x[i] += al * p[i]; r[i] -= al * q[i]; z[i] = M[i] > 0 ? r[i] / M[i] : 0; rz2 += r[i] * z[i]; rr += r[i] * r[i]; }
+      const be = rz2 / rz; rz = rz2;
+      for (let i = 0; i < n; i++) p[i] = z[i] + be * p[i];
+      res = Math.sqrt(rr) / bn; it++;
+      if (!isFinite(res)) return { iter: it, res, converged: false };
+      if (tick && (it & 3) === 0 && Date.now() - last > 120) { last = Date.now(); if ((await tick(it, res)) === false) return { iter: it, res, converged: false, cancelled: true }; }
+    }
+    return { iter: it, res, converged: res <= tol };
+  }
+
+  /* ---------- Conditions aux limites ---------- */
+  function d2PointTri(px, py, pz, T, i) {
+    const ax = T[i], ay = T[i + 1], az = T[i + 2], bx = T[i + 3], by = T[i + 4], bz = T[i + 5], cx = T[i + 6], cy = T[i + 7], cz = T[i + 8];
+    const abx = bx - ax, aby = by - ay, abz = bz - az, acx = cx - ax, acy = cy - ay, acz = cz - az, apx = px - ax, apy = py - ay, apz = pz - az;
+    const d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
+    let qx, qy, qz;
+    if (d1 <= 0 && d2 <= 0) { qx = ax; qy = ay; qz = az; }
+    else {
+      const bpx = px - bx, bpy = py - by, bpz = pz - bz, d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
+      if (d3 >= 0 && d4 <= d3) { qx = bx; qy = by; qz = bz; }
+      else {
+        const vc = d1 * d4 - d3 * d2;
+        if (vc <= 0 && d1 >= 0 && d3 <= 0) { const v = d1 / (d1 - d3); qx = ax + v * abx; qy = ay + v * aby; qz = az + v * abz; }
+        else {
+          const cpx = px - cx, cpy = py - cy, cpz = pz - cz, d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
+          if (d6 >= 0 && d5 <= d6) { qx = cx; qy = cy; qz = cz; }
+          else {
+            const vb = d5 * d2 - d1 * d6;
+            if (vb <= 0 && d2 >= 0 && d6 <= 0) { const w = d2 / (d2 - d6); qx = ax + w * acx; qy = ay + w * acy; qz = az + w * acz; }
+            else {
+              const va = d3 * d6 - d5 * d4;
+              if (va <= 0 && (d4 - d3) >= 0 && (d5 - d6) >= 0) { const w = (d4 - d3) / ((d4 - d3) + (d5 - d6)); qx = bx + w * (cx - bx); qy = by + w * (cy - by); qz = bz + w * (cz - bz); }
+              else { const dn = 1 / (va + vb + vc), v = vb * dn, w = vc * dn; qx = ax + abx * v + acx * w; qy = ay + aby * v + acy * w; qz = az + abz * v + acz * w; }
+            }
+          }
+        }
+      }
+    }
+    return (px - qx) * (px - qx) + (py - qy) * (py - qy) + (pz - qz) * (pz - qz);
+  }
+
+  /* nœuds de surface du maillage situés à moins de tol des triangles choisis */
+  function nodesNearTris(mesh, tris, list, tol) {
+    const { nx, ny, nz, h, ox, oy, oz, nodeMap, nodeArea } = mesh, mx = nx + 1, my = ny + 1;
+    const mark = new Uint8Array(mesh.nn), out = [], t2 = tol * tol;
+    for (const t of list) {
+      const i = t * 9;
+      const i0 = Math.max(0, Math.ceil((Math.min(tris[i], tris[i + 3], tris[i + 6]) - tol - ox) / h)), i1 = Math.min(nx, Math.floor((Math.max(tris[i], tris[i + 3], tris[i + 6]) + tol - ox) / h));
+      const j0 = Math.max(0, Math.ceil((Math.min(tris[i + 1], tris[i + 4], tris[i + 7]) - tol - oy) / h)), j1 = Math.min(ny, Math.floor((Math.max(tris[i + 1], tris[i + 4], tris[i + 7]) + tol - oy) / h));
+      const k0 = Math.max(0, Math.ceil((Math.min(tris[i + 2], tris[i + 5], tris[i + 8]) - tol - oz) / h)), k1 = Math.min(nz, Math.floor((Math.max(tris[i + 2], tris[i + 5], tris[i + 8]) + tol - oz) / h));
+      for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
+        const id = nodeMap[ii + mx * (j + my * k)]; if (id < 0 || mark[id] || !nodeArea[id]) continue;
+        if (d2PointTri(ox + ii * h, oy + j * h, oz + k * h, tris, i) <= t2) { mark[id] = 1; out.push(id); }
+      }
+    }
+    return Int32Array.from(out);
+  }
+
+  /* bcs : [{type:'fix'|'disp'|'force', nodes, v:[x,y,z]}] ; pour 'disp', une composante null est libre */
+  function buildBC(mesh, bcs) {
+    const n = mesh.nn * 3, fixed = new Uint8Array(n), x = new Float64Array(n), f = new Float64Array(n);
+    for (const b of bcs) {
+      if (b.type === 'force') {
+        /* poids = nombre de faces entièrement dans la zone autour du nœud (charge répartie uniforme) */
+        const mk = new Uint8Array(mesh.nn), wt = new Float32Array(mesh.nn), q = mesh.faces.quads; for (const nd of b.nodes) mk[nd] = 1;
+        for (let i = 0; i < q.length; i += 4) if (mk[q[i]] && mk[q[i + 1]] && mk[q[i + 2]] && mk[q[i + 3]]) { wt[q[i]]++; wt[q[i + 1]]++; wt[q[i + 2]]++; wt[q[i + 3]]++; }
+        let W = 0; for (const nd of b.nodes) { if (!wt[nd]) wt[nd] = 0.5; W += wt[nd]; }
+        if (W > 0) for (const nd of b.nodes) { const w = wt[nd] / W; for (let c = 0; c < 3; c++) f[nd * 3 + c] += b.v[c] * w; }
+      } else for (const nd of b.nodes) for (let c = 0; c < 3; c++) {
+        const val = b.type === 'fix' ? 0 : b.v[c]; if (val === null || val === undefined) continue;
+        fixed[nd * 3 + c] = 1; x[nd * 3 + c] = val;
+      }
+    }
+    return { fixed, x, f };
+  }
+
+  /* ---------- Post-traitement ---------- */
+  /* Contraintes aux nœuds : déformations normales évaluées aux coins de l'élément (valeur en surface),
+     cisaillements au centre (évite le cisaillement parasite), tenseur moyenné aux nœuds. */
+  function computeResults(mesh, E, nu, u) {
+    const { ne, nn, conn, h } = mesh, S = new Float32Array(nn * 6), vmN = new Float32Array(nn), cnt = new Uint16Array(nn), dN = new Float32Array(nn);
+    const l = E * nu / ((1 + nu) * (1 - 2 * nu)), m = E / (2 * (1 + nu)), k = 1 / (4 * h), ih = 1 / h;
+    for (let e = 0; e < ne; e++) {
+      const b = e * 8; let gxy = 0, gyz = 0, gzx = 0;
+      for (let a = 0; a < 8; a++) {
+        const n = conn[b + a] * 3, sx = ((a & 1) * 2 - 1) * k, sy = (((a >> 1) & 1) * 2 - 1) * k, sz = (((a >> 2) & 1) * 2 - 1) * k;
+        gxy += sy * u[n] + sx * u[n + 1]; gyz += sz * u[n + 1] + sy * u[n + 2]; gzx += sz * u[n] + sx * u[n + 2];
+      }
+      const sxy = m * gxy, syz = m * gyz, szx = m * gzx;
+      for (let a = 0; a < 8; a++) {
+        const exx = (u[conn[b + (a | 1)] * 3] - u[conn[b + (a & 6)] * 3]) * ih;
+        const eyy = (u[conn[b + (a | 2)] * 3 + 1] - u[conn[b + (a & 5)] * 3 + 1]) * ih;
+        const ezz = (u[conn[b + (a | 4)] * 3 + 2] - u[conn[b + (a & 3)] * 3 + 2]) * ih;
+        const tr = l * (exx + eyy + ezz), n = conn[b + a], q = n * 6;
+        S[q] += tr + 2 * m * exx; S[q + 1] += tr + 2 * m * eyy; S[q + 2] += tr + 2 * m * ezz; S[q + 3] += sxy; S[q + 4] += syz; S[q + 5] += szx; cnt[n]++;
+      }
+    }
+    let maxD = 0, maxVm = 0;
+    for (let n = 0; n < nn; n++) {
+      const c = 1 / (cnt[n] || 1), q = n * 6, sxx = S[q] * c, syy = S[q + 1] * c, szz = S[q + 2] * c, sxy = S[q + 3] * c, syz = S[q + 4] * c, szx = S[q + 5] * c;
+      vmN[n] = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * (sxy * sxy + syz * syz + szx * szx));
+      if (vmN[n] > maxVm) maxVm = vmN[n];
+      dN[n] = Math.hypot(u[n * 3], u[n * 3 + 1], u[n * 3 + 2]); if (dN[n] > maxD) maxD = dN[n];
+    }
+    const s = Float32Array.from(vmN).sort(), p99 = s[Math.min(nn - 1, Math.floor(nn * 0.99))];
+    return { u, vmN, dN, maxD, maxVm, p99 };
+  }
+
+  /* ---------- Optimisation topologique (SIMP, critère d'optimalité) ---------- */
+  async function topopt(o) {
+    const { mesh, Ke, E, fixed, f, passive, volfrac, tick, onIter } = o, iters = o.iters || 30;
+    const { ne, conn, nx, ny, nz, elemOf, elemG, h } = mesh, pen = 3, Emin = 1e-3, move = 0.2, sxy = nx * ny;
+    const x = new Float64Array(ne).fill(volfrac), scale = new Float64Array(ne), dc = new Float64Array(ne), dcf = new Float64Array(ne), xn = new Float64Array(ne);
+    for (let e = 0; e < ne; e++) if (passive[e]) x[e] = 1;
+    const u = Float64Array.from(o.x0), ue = new Float64Array(24);
+    let np = 0; for (let e = 0; e < ne; e++) np += passive[e];
+    const target = Math.max(volfrac * ne, np + 1);
+    for (let it = 1; it <= iters; it++) {
+      for (let e = 0; e < ne; e++) scale[e] = E * h * (Emin + Math.pow(x[e], pen) * (1 - Emin));
+      const r = await pcg({ mesh, Ke, scale, fixed, x: u, f, tol: 1e-3, maxIter: 8000, tick: tick ? (i, res) => tick(it, i, res) : null });
+      if (r.cancelled) return { x, cancelled: true, iter: it };
+      let comp = 0;
+      for (let e = 0; e < ne; e++) {
+        for (let a = 0; a < 8; a++) { const n = conn[e * 8 + a] * 3; ue[a * 3] = u[n]; ue[a * 3 + 1] = u[n + 1]; ue[a * 3 + 2] = u[n + 2]; }
+        let ce = 0; for (let i = 0; i < 24; i++) { let s = 0; for (let j = 0; j < 24; j++) s += Ke[i * 24 + j] * ue[j]; ce += ue[i] * s; }
+        ce *= E * h; comp += (Emin + Math.pow(x[e], pen) * (1 - Emin)) * ce;
+        dc[e] = -pen * x[e] * x[e] * (1 - Emin) * ce;
+      }
+      /* filtre de sensibilité, rayon 1,5 h */
+      for (let e = 0; e < ne; e++) {
+        const g = elemG[e], i = g % nx, j = ((g / nx) | 0) % ny, k = (g / sxy) | 0; let sw = 0, s = 0;
+        for (let dk = -1; dk <= 1; dk++) for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+          const w = 1.5 - Math.sqrt(di * di + dj * dj + dk * dk); if (w <= 0) continue;
+          const a = i + di, b = j + dj, c = k + dk; if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz) continue;
+          const q = elemOf[a + nx * (b + ny * c)]; if (q < 0) continue;
+          sw += w; s += w * x[q] * dc[q];
+        }
+        dcf[e] = s / (Math.max(1e-3, x[e]) * sw);
+      }
+      let l1 = 0, l2 = 1e-30; for (let e = 0; e < ne; e++) if (-dcf[e] > l2) l2 = -dcf[e];
+      l2 *= 4;
+      for (let b = 0; b < 60; b++) {
+        const lm = 0.5 * (l1 + l2); let sum = 0;
+        for (let e = 0; e < ne; e++) {
+          let v = passive[e] ? 1 : x[e] * Math.sqrt(Math.max(0, -dcf[e]) / lm);
+          if (!passive[e]) v = Math.max(1e-3, Math.max(x[e] - move, Math.min(1, Math.min(x[e] + move, v))));
+          xn[e] = v; sum += v;
+        }
+        if (sum > target) l1 = lm; else l2 = lm;
+      }
+      let ch = 0; for (let e = 0; e < ne; e++) { const d = Math.abs(xn[e] - x[e]); if (d > ch) ch = d; x[e] = xn[e]; }
+      if (onIter && (await onIter(it, x, comp, ch)) === false) return { x, cancelled: true, iter: it };
+      if (ch < 0.01 && it > 10) return { x, iter: it };
+    }
+    return { x, iter: iters };
+  }
+
+  /* ---------- Pièce d'exemple : biellette de suspension ---------- */
+  function demoLink() {
+    const L = 120, r = 8, R = 18, t = 12, N = 24, T = [], tag = [];
+    const tri = (a, b, c, n, g) => {
+      const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
+      const d = (uy * vz - uz * vy) * n[0] + (uz * vx - ux * vz) * n[1] + (ux * vy - uy * vx) * n[2];
+      if (d >= 0) T.push(...a, ...b, ...c); else T.push(...a, ...c, ...b); tag.push(g);
+    };
+    const wall = (p, q, n, g) => { tri([p[0], p[1], 0], [q[0], q[1], 0], [q[0], q[1], t], n, g); tri([p[0], p[1], 0], [q[0], q[1], t], [p[0], p[1], t], n, g); };
+    const cap = (a, b, c) => { tri([a[0], a[1], 0], [b[0], b[1], 0], [c[0], c[1], 0], [0, 0, -1], 0); tri([a[0], a[1], t], [b[0], b[1], t], [c[0], c[1], t], [0, 0, 1], 0); };
+    for (const sgn of [1, -1]) {
+      const cx = sgn * L / 2, g = sgn > 0 ? 2 : 1;
+      for (let s = 0; s < 2 * N; s++) {
+        const a0 = -Math.PI / 2 + s * Math.PI / N, a1 = a0 + Math.PI / N;
+        const c0 = Math.cos(a0) * sgn, s0 = Math.sin(a0), c1 = Math.cos(a1) * sgn, s1 = Math.sin(a1);
+        const h0 = [cx + r * c0, r * s0], h1 = [cx + r * c1, r * s1];
+        wall(h0, h1, [-(c0 + c1), -(s0 + s1), 0], g);
+        let o0, o1;
+        if (s < N) { o0 = [cx + R * c0, R * s0]; o1 = [cx + R * c1, R * s1]; wall(o0, o1, [c0 + c1, s0 + s1, 0], 0); }
+        else { o0 = [0, R * s0]; o1 = [0, R * s1]; }
+        cap(h0, o0, o1); cap(h0, o1, h1);
+      }
+      cap([cx, r], [cx, R], [0, R]); cap([cx, -r], [0, -R], [cx, -R]);
+      wall([cx, R], [0, R], [0, 1, 0], 0); wall([cx, -R], [0, -R], [0, -1, 0], 0);
+    }
+    const tris = new Float32Array(T), holeL = [], holeR = [];
+    tag.forEach((g, i) => { if (g === 1) holeL.push(i); else if (g === 2) holeR.push(i); });
+    return { tris, holeL, holeR };
+  }
+
+  return { parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, buildBC, computeResults, topopt, demoLink, FACE_N };
+})();
+if (typeof module !== 'undefined') module.exports = FEA;
+</script>
+<script>
+'use strict';
+(function () {
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const fmt = (x, n = 3) => (x === null || x === undefined || !isFinite(x)) ? '—' : Number(x).toLocaleString('fr-CA', { maximumSignificantDigits: n });
+  const UNIT = { mm: 1, cm: 10, m: 1000, po: 25.4 }, LBF = 4.4482216;
+  const MATS = [
+    { n: 'Acier AISI 4130 normalisé', E: 205000, nu: 0.29, Sy: 435, rho: 7850 },
+    { n: 'Acier AISI 1020 étiré à froid', E: 200000, nu: 0.29, Sy: 350, rho: 7870 },
+    { n: 'Acier inoxydable 304', E: 193000, nu: 0.29, Sy: 215, rho: 8000 },
+    { n: 'Aluminium 6061-T6', E: 68900, nu: 0.33, Sy: 276, rho: 2700 },
+    { n: 'Aluminium 7075-T6', E: 71700, nu: 0.33, Sy: 503, rho: 2810 },
+    { n: 'Titane Ti-6Al-4V', E: 113800, nu: 0.342, Sy: 880, rho: 4430 },
+    { n: 'Personnalisé', E: 200000, nu: 0.3, Sy: 250, rho: 7850 }];
+  const TABS = [['model', 'Modèle'], ['mesh', 'Maillage'], ['study', 'Étude'], ['results', 'Résultats'], ['opt', 'Optimisation']];
+  const BCC = { fix: [0.33, 0.6, 1.0], disp: [0.68, 0.5, 1.0], force: [0.96, 0.78, 0.25] }, BCN = { fix: 'Appui fixe', disp: 'Déplacement imposé', force: 'Force' };
+  const hex = c => '#' + c.map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
+
+  const S = {
+    name: 'Sans titre', raw: null, unit: 'mm', tris: null, surf: null, gi: null, matIdx: 0, mat: Object.assign({}, MATS[0]),
+    h: 2, mesh: null, bcs: [], nextId: 1, activeBC: null, sel: null, selMode: 'auto', selTol: 20, hover: null, hoverSeed: -1,
+    tab: 'model', res: null, stale: false, resField: 'vm', showDef: true, defMult: 1, fsTarget: 1.5, forceUnit: 'N',
+    showEdges: true, showGrid: true, showLabels: true, opt: { vf: 40, iters: 30, x: null, thr: 0.5, info: '' }, busy: false, cancel: false, probe: null
+  };
+  window.__S = S;
+
+  /* ================= Rendu WebGL ================= */
+  const glc = $('#gl'), ovc = $('#ov'), gl = glc.getContext('webgl', { antialias: true }), ctx = ovc.getContext('2d');
+  const R = { bufs: {}, cam: { t: [0, 0, 0], d: 300, yaw: 0.7, pitch: 0.45 }, need: true, w: 1, h: 1, mvp: null, pick: null, fov: 32 * Math.PI / 180 };
+  const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, 'attribute vec3 aP,aN,aC;uniform mat4 uM;uniform mat3 uN;varying vec3 vC,vN;void main(){vC=aC;vN=uN*aN;gl_Position=uM*vec4(aP,1.);}'));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, 'precision mediump float;varying vec3 vC,vN;uniform float uL;void main(){vec3 n=normalize(vN);float l=.34+.66*abs(dot(n,normalize(vec3(.35,.5,.8))));gl_FragColor=vec4(vC*mix(1.,l,uL),1.);}'));
+  gl.bindAttribLocation(prog, 0, 'aP'); gl.bindAttribLocation(prog, 1, 'aN'); gl.bindAttribLocation(prog, 2, 'aC');
+  gl.linkProgram(prog); gl.useProgram(prog);
+  const uM = gl.getUniformLocation(prog, 'uM'), uN = gl.getUniformLocation(prog, 'uN'), uL = gl.getUniformLocation(prog, 'uL');
+  function setBuf(name, o) {
+    const old = R.bufs[name]; if (old) for (const k of ['p', 'n', 'c']) if (old[k]) gl.deleteBuffer(old[k]);
+    if (!o) { delete R.bufs[name]; return; }
+    const b = { count: o.pos.length / 3, lines: !!o.lines, color: o.color };
+    const mk = a => { const g = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, g); gl.bufferData(gl.ARRAY_BUFFER, a, gl.DYNAMIC_DRAW); return g; };
+    b.p = mk(o.pos); if (o.nrm) b.n = mk(o.nrm); if (o.col) b.c = mk(o.col);
+    R.bufs[name] = b; R.need = true;
+  }
+  function setCol(name, col) { const b = R.bufs[name]; if (!b) return; gl.bindBuffer(gl.ARRAY_BUFFER, b.c); gl.bufferSubData(gl.ARRAY_BUFFER, 0, col); R.need = true; }
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+  function camBasis() {
+    const c = R.cam, cp = Math.cos(c.pitch), z = [cp * Math.sin(c.yaw), Math.sin(c.pitch), cp * Math.cos(c.yaw)];
+    const x = norm(cross([0, 1, 0], z)), y = cross(z, x), eye = [c.t[0] + z[0] * c.d, c.t[1] + z[1] * c.d, c.t[2] + z[2] * c.d];
+    return { x, y, z, eye };
+  }
+  function matrices() {
+    const { x, y, z, eye } = camBasis(), dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const V = [x[0], y[0], z[0], 0, x[1], y[1], z[1], 0, x[2], y[2], z[2], 0, -dot(x, eye), -dot(y, eye), -dot(z, eye), 1];
+    const f = 1 / Math.tan(R.fov / 2), a = R.w / R.h, nr = R.cam.d * 0.02, fr = R.cam.d * 20;
+    const P = [f / a, 0, 0, 0, 0, f, 0, 0, 0, 0, (fr + nr) / (nr - fr), -1, 0, 0, 2 * fr * nr / (nr - fr), 0], M = new Float32Array(16);
+    for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += P[k * 4 + r] * V[c * 4 + k]; M[c * 4 + r] = s; }
+    R.mvp = M; R.nm = new Float32Array([x[0], y[0], z[0], x[1], y[1], z[1], x[2], y[2], z[2]]);
+  }
+  function project(p) {
+    const M = R.mvp, w = M[3] * p[0] + M[7] * p[1] + M[11] * p[2] + M[15]; if (w <= 0) return null;
+    return [((M[0] * p[0] + M[4] * p[1] + M[8] * p[2] + M[12]) / w * 0.5 + 0.5) * R.w, (1 - ((M[1] * p[0] + M[5] * p[1] + M[9] * p[2] + M[13]) / w * 0.5 + 0.5)) * R.h];
+  }
+  function sceneList() {
+    const t = S.tab, b = R.bufs;
+    if (t === 'results' && b.res) return ['res', S.showEdges && 'resL'];
+    if (t === 'opt' && b.opt) return ['opt', S.showEdges && 'optL'];
+    if ((t === 'mesh' || t === 'results' || t === 'opt') && b.mesh) return ['mesh', S.showEdges && 'meshL'];
+    return ['geo', 'geoL'];
+  }
+  function draw() {
+    R.need = false;
+    const dpr = window.devicePixelRatio || 1, w = glc.clientWidth, h = glc.clientHeight;
+    if (glc.width !== Math.round(w * dpr) || glc.height !== Math.round(h * dpr)) { glc.width = ovc.width = Math.round(w * dpr); glc.height = ovc.height = Math.round(h * dpr); }
+    R.w = w || 1; R.h = h || 1; matrices();
+    gl.viewport(0, 0, glc.width, glc.height); gl.clearColor(0.043, 0.059, 0.078, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST); gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(1, 1);
+    gl.uniformMatrix4fv(uM, false, R.mvp); gl.uniformMatrix3fv(uN, false, R.nm);
+    const list = sceneList().concat(S.showGrid ? ['grid'] : []);
+    R.pickName = list[0];
+    for (const nm of list) {
+      const b = nm && R.bufs[nm]; if (!b || !b.count) continue;
+      gl.bindBuffer(gl.ARRAY_BUFFER, b.p); gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+      if (b.lines) { gl.disableVertexAttribArray(1); gl.disableVertexAttribArray(2); gl.vertexAttrib3f(1, 0, 0, 1); gl.vertexAttrib3f(2, b.color[0], b.color[1], b.color[2]); gl.uniform1f(uL, 0); gl.drawArrays(gl.LINES, 0, b.count); }
+      else {
+        gl.bindBuffer(gl.ARRAY_BUFFER, b.n); gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, b.c); gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 0, 0);
+        gl.uniform1f(uL, 1); gl.drawArrays(gl.TRIANGLES, 0, b.count);
+      }
+    }
+    drawOverlay(dpr);
+  }
+  function drawOverlay(dpr) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, R.w, R.h);
+    /* trièdre */
+    const { x, y } = camBasis(), o = [46, R.h - 52], ax = [[1, 0, 0, '#e5534b', 'X'], [0, 1, 0, '#3fb96a', 'Y'], [0, 0, 1, '#4c8dff', 'Z']];
+    ctx.font = '10px ui-monospace,Consolas,monospace'; ctx.lineWidth = 1.5;
+    for (const a of ax) {
+      const dx = (a[0] * x[0] + a[1] * x[1] + a[2] * x[2]) * 30, dy = -(a[0] * y[0] + a[1] * y[1] + a[2] * y[2]) * 30;
+      ctx.strokeStyle = ctx.fillStyle = a[3]; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(o[0] + dx, o[1] + dy); ctx.stroke(); ctx.fillText(a[4], o[0] + dx * 1.3 - 3, o[1] + dy * 1.3 + 3);
+    }
+    if (!S.tris || !S.showLabels) return;
+    ctx.font = 'bold 11px ui-monospace,Consolas,monospace';
+    for (const b of S.bcs) {
+      const p = project(b.c); if (!p) continue;
+      const col = hex(BCC[b.type]); ctx.strokeStyle = ctx.fillStyle = col;
+      if (b.type === 'fix') { ctx.fillRect(p[0] - 4, p[1] - 4, 8, 8); ctx.fillText(b.name, p[0] + 9, p[1] + 4); continue; }
+      const v = b.type === 'disp' ? b.v.map((q, i) => b.free[i] ? 0 : q) : b.v, m = Math.hypot(v[0], v[1], v[2]);
+      const lab = b.type === 'force' ? fmt(m / (S.forceUnit === 'lbf' ? LBF : 1), 4) + ' ' + S.forceUnit : fmt(m, 3) + ' mm';
+      if (m === 0) { ctx.fillText(b.name, p[0] + 9, p[1] + 4); continue; }
+      const L = (S.gi ? Math.hypot(...S.gi.size) : 100) * 0.22, q = project([b.c[0] - v[0] / m * L, b.c[1] - v[1] / m * L, b.c[2] - v[2] / m * L]); if (!q) continue;
+      const dx = p[0] - q[0], dy = p[1] - q[1], l = Math.hypot(dx, dy) || 1, ux = dx / l, uy = dy / l;
+      ctx.lineWidth = 1.5; ctx.beginPath(); ctx.moveTo(q[0], q[1]); ctx.lineTo(p[0], p[1]); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0] - ux * 10 - uy * 4, p[1] - uy * 10 + ux * 4); ctx.lineTo(p[0] - ux * 10 + uy * 4, p[1] - uy * 10 - ux * 4); ctx.fill();
+      ctx.fillText(lab, q[0] - ctx.measureText(lab).width / 2, q[1] - 7);
+    }
+  }
+  (function loop() { if (R.need) draw(); requestAnimationFrame(loop); })();
+  new ResizeObserver(() => { R.need = true; }).observe(glc);
+
+  function fit() {
+    if (!S.gi) return; const g = S.gi;
+    R.cam.t = [(g.min[0] + g.max[0]) / 2, (g.min[1] + g.max[1]) / 2, (g.min[2] + g.max[2]) / 2];
+    R.cam.d = Math.hypot(...g.size) / 2 / Math.sin(R.fov / 2) * 1.05; R.need = true;
+  }
+  function setView(v) { const c = R.cam; if (v === 'iso') { c.yaw = 0.7; c.pitch = 0.45; } else if (v === 'front') { c.yaw = 0; c.pitch = 0; } else if (v === 'right') { c.yaw = Math.PI / 2; c.pitch = 0; } else { c.yaw = 0; c.pitch = Math.PI / 2 - 0.001; } fit(); }
+
+  /* ---------- interaction souris ---------- */
+  function ray(ev) {
+    const r = ovc.getBoundingClientRect(), nx = ((ev.clientX - r.left) / R.w) * 2 - 1, ny = 1 - ((ev.clientY - r.top) / R.h) * 2;
+    const { x, y, z, eye } = camBasis(), t = Math.tan(R.fov / 2), a = R.w / R.h;
+    return { o: eye, d: norm([-z[0] + x[0] * nx * t * a + y[0] * ny * t, -z[1] + x[1] * nx * t * a + y[1] * ny * t, -z[2] + x[2] * nx * t * a + y[2] * ny * t]) };
+  }
+  function pickTri(P, ro, rd) {
+    let best = Infinity, idx = -1;
+    for (let i = 0; i < P.length; i += 9) {
+      const e1x = P[i + 3] - P[i], e1y = P[i + 4] - P[i + 1], e1z = P[i + 5] - P[i + 2], e2x = P[i + 6] - P[i], e2y = P[i + 7] - P[i + 1], e2z = P[i + 8] - P[i + 2];
+      const px = rd[1] * e2z - rd[2] * e2y, py = rd[2] * e2x - rd[0] * e2z, pz = rd[0] * e2y - rd[1] * e2x, det = e1x * px + e1y * py + e1z * pz;
+      if (det > -1e-12 && det < 1e-12) continue;
+      const inv = 1 / det, tx = ro[0] - P[i], ty = ro[1] - P[i + 1], tz = ro[2] - P[i + 2], u = (tx * px + ty * py + tz * pz) * inv; if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x, v = (rd[0] * qx + rd[1] * qy + rd[2] * qz) * inv; if (v < 0 || u + v > 1) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv; if (t > 0 && t < best) { best = t; idx = i / 9; }
+    }
+    return idx < 0 ? null : { idx, t: best };
+  }
+  let drag = null, hoverEv = null;
+  ovc.addEventListener('contextmenu', e => e.preventDefault());
+  ovc.addEventListener('mousedown', e => { drag = { x: e.clientX, y: e.clientY, b: e.button, moved: false }; });
+  window.addEventListener('mousemove', e => {
+    if (drag) {
+      const dx = e.clientX - drag.x, dy = e.clientY - drag.y; if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      if (!drag.moved) return; drag.x = e.clientX; drag.y = e.clientY; const c = R.cam;
+      if (drag.b === 0) { c.yaw -= dx * 0.008; c.pitch = Math.max(-1.57, Math.min(1.57, c.pitch + dy * 0.008)); }
+      else { const { x, y } = camBasis(), k = c.d * 2 * Math.tan(R.fov / 2) / R.h; for (let i = 0; i < 3; i++) c.t[i] += (-x[i] * dx + y[i] * dy) * k; }
+      R.need = true;
+    } else if (e.target === ovc) hoverEv = e;
+  });
+  window.addEventListener('mouseup', e => { if (drag && !drag.moved && drag.b === 0 && e.target === ovc) click(e); drag = null; });
+  ovc.addEventListener('wheel', e => { e.preventDefault(); R.cam.d *= Math.exp(e.deltaY * 0.0012); R.need = true; }, { passive: false });
+  ovc.addEventListener('mouseleave', () => { hoverEv = null; if (S.hover) { S.hover = null; S.hoverSeed = -1; geoColors(); } });
+  setInterval(() => { if (!hoverEv || drag || S.busy) return; const e = hoverEv; hoverEv = null; hover(e); }, 40);
+  const selectable = () => S.tris && (S.tab === 'model' || S.tab === 'study');
+  function hover(e) {
+    const r = ray(e);
+    if (selectable()) {
+      const h = pickTri(S.tris, r.o, r.d), seed = h ? h.idx : -1;
+      if (seed === S.hoverSeed) return;
+      if (seed >= 0 && S.hoverMask && S.hoverMask[seed]) { S.hoverSeed = seed; return; }
+      S.hoverSeed = seed; S.hover = seed < 0 ? null : FEA.selectRegion(S.surf, seed, S.selMode, S.selTol);
+      S.hoverMask = null; if (S.hover) { S.hoverMask = new Uint8Array(S.surf.nt); for (const t of S.hover) S.hoverMask[t] = 1; }
+      geoColors();
+    } else if (R.pick && R.pickName === R.pick.name) {
+      const h = pickTri(R.pick.pos, r.o, r.d); let txt = '';
+      if (h && R.pick.val) {
+        const f = h.idx >> 1, q = R.pick.quads, P = [r.o[0] + r.d[0] * h.t, r.o[1] + r.d[1] * h.t, r.o[2] + r.d[2] * h.t]; let bd = Infinity, bn = -1;
+        for (let k = 0; k < 4; k++) { const i = (f * 6 + [0, 1, 2, 5][k]) * 3, d = (R.pick.pos[i] - P[0]) ** 2 + (R.pick.pos[i + 1] - P[1]) ** 2 + (R.pick.pos[i + 2] - P[2]) ** 2; if (d < bd) { bd = d; bn = q[f * 4 + k]; } }
+        txt = fmt(R.pick.val(bn), 4) + ' ' + R.pick.unit;
+      }
+      if (txt !== S.probe) { S.probe = txt; legend(); }
+    }
+  }
+  function click(e) {
+    if (!selectable() || S.busy) return;
+    const r = ray(e), h = pickTri(S.tris, r.o, r.d), add = e.ctrlKey || e.shiftKey || e.metaKey;
+    if (!h) { if (!add) { S.sel.fill(0); geoColors(); ui(); } return; }
+    const reg = FEA.selectRegion(S.surf, h.idx, S.selMode, S.selTol);
+    if (add) { const v = S.sel[h.idx] ? 0 : 1; for (const t of reg) S.sel[t] = v; }
+    else { S.sel.fill(0); for (const t of reg) S.sel[t] = 1; }
+    geoColors(); ui();
+  }
+
+  /* ================= Tampons de géométrie ================= */
+  const CMAP = [[0.23, 0.30, 1.0], [0.16, 0.67, 0.90], [0.24, 0.78, 0.47], [0.94, 0.82, 0.24], [0.92, 0.31, 0.24]];
+  function cmap(t, out, o) { t = t < 0 ? 0 : t > 1 ? 1 : t; const s = t * 4, i = Math.min(3, s | 0), f = s - i, a = CMAP[i], b = CMAP[i + 1]; out[o] = a[0] + (b[0] - a[0]) * f; out[o + 1] = a[1] + (b[1] - a[1]) * f; out[o + 2] = a[2] + (b[2] - a[2]) * f; }
+  function geoBuffers() {
+    const T = S.tris, nt = S.surf.nt, N = S.surf.normals, nrm = new Float32Array(nt * 9);
+    for (let t = 0; t < nt; t++) for (let v = 0; v < 3; v++) { nrm[t * 9 + v * 3] = N[t * 3]; nrm[t * 9 + v * 3 + 1] = N[t * 3 + 1]; nrm[t * 9 + v * 3 + 2] = N[t * 3 + 2]; }
+    S.geoCol = new Float32Array(nt * 9); setBuf('geo', { pos: T, nrm, col: S.geoCol });
+    const L = [], cs = Math.cos(25 * Math.PI / 180), A = S.surf.adj;
+    for (let t = 0; t < nt; t++) for (let e = 0; e < 3; e++) {
+      const o = A[t * 3 + e]; if (o >= 0 && o < t) continue;
+      if (o >= 0 && N[t * 3] * N[o * 3] + N[t * 3 + 1] * N[o * 3 + 1] + N[t * 3 + 2] * N[o * 3 + 2] > cs) continue;
+      const a = t * 9 + e * 3, b = t * 9 + ((e + 1) % 3) * 3; L.push(T[a], T[a + 1], T[a + 2], T[b], T[b + 1], T[b + 2]);
+    }
+    setBuf('geoL', { pos: new Float32Array(L), lines: true, color: [0.07, 0.09, 0.12] });
+    const g = S.gi, sz = Math.max(g.size[0], g.size[2], g.size[1]) * 1.4, st = Math.pow(10, Math.floor(Math.log10(sz / 6))), n = Math.ceil(sz / st / 2), cx = Math.round((g.min[0] + g.max[0]) / 2 / st) * st, cz = Math.round((g.min[2] + g.max[2]) / 2 / st) * st, y = g.min[1] - g.size[1] * 0.02 - st * 0.02, G = [];
+    for (let i = -n; i <= n; i++) G.push(cx + i * st, y, cz - n * st, cx + i * st, y, cz + n * st, cx - n * st, y, cz + i * st, cx + n * st, y, cz + i * st);
+    setBuf('grid', { pos: new Float32Array(G), lines: true, color: [0.15, 0.18, 0.23] });
+    geoColors();
+  }
+  function geoColors() {
+    if (!S.geoCol) return; const C = S.geoCol, nt = S.surf.nt, own = new Int8Array(nt).fill(-1);
+    S.bcs.forEach((b, i) => { for (const t of b.tris) own[t] = i; });
+    for (let t = 0; t < nt; t++) {
+      let r = 0.6, g = 0.65, b = 0.72;
+      if (own[t] >= 0) { const bc = S.bcs[own[t]], c = BCC[bc.type], k = bc.id === S.activeBC ? 1 : 0.8; r = c[0] * k; g = c[1] * k; b = c[2] * k; }
+      if (S.sel[t]) { r = 0.91; g = 0.45; b = 0.31; }
+      if (S.hoverMask && S.hoverMask[t] && selectable()) { r = r * 0.6 + 0.4; g = g * 0.6 + 0.4; b = b * 0.6 + 0.4; }
+      for (let v = 0; v < 3; v++) { C[t * 9 + v * 3] = r; C[t * 9 + v * 3 + 1] = g; C[t * 9 + v * 3 + 2] = b; }
+    }
+    setCol('geo', C);
+  }
+  /* faces de voxels -> triangles ; val(n) donne t ∈ [0,1] par nœud, sinon couleur unie */
+  function faceBuffers(name, faces, tOf, u, k, base) {
+    const nf = faces.n, q = faces.quads, X = S.mesh.coords, pos = new Float32Array(nf * 18), nrm = new Float32Array(nf * 18), col = new Float32Array(nf * 18), lin = new Float32Array(nf * 24), ord = [0, 1, 2, 0, 2, 3];
+    for (let f = 0; f < nf; f++) {
+      const N = FEA.FACE_N[faces.dir[f]];
+      for (let v = 0; v < 6; v++) {
+        const n = q[f * 4 + ord[v]], o = f * 18 + v * 3;
+        pos[o] = X[n * 3] + (u ? u[n * 3] * k : 0); pos[o + 1] = X[n * 3 + 1] + (u ? u[n * 3 + 1] * k : 0); pos[o + 2] = X[n * 3 + 2] + (u ? u[n * 3 + 2] * k : 0);
+        nrm[o] = N[0]; nrm[o + 1] = N[1]; nrm[o + 2] = N[2];
+        if (tOf) cmap(tOf(n), col, o); else { col[o] = base[0]; col[o + 1] = base[1]; col[o + 2] = base[2]; }
+      }
+      for (let e = 0; e < 4; e++) { const a = f * 18 + [0, 1, 2, 5][e] * 3, b = f * 18 + [1, 2, 5, 0][e] * 3, o = f * 24 + e * 6; lin[o] = pos[a]; lin[o + 1] = pos[a + 1]; lin[o + 2] = pos[a + 2]; lin[o + 3] = pos[b]; lin[o + 4] = pos[b + 1]; lin[o + 5] = pos[b + 2]; }
+    }
+    setBuf(name, { pos, nrm, col }); setBuf(name + 'L', { pos: lin, lines: true, color: [0.05, 0.07, 0.09] });
+    return pos;
+  }
+  function meshBuffers() { if (S.mesh) faceBuffers('mesh', S.mesh.faces, null, null, 0, [0.5, 0.62, 0.78]); }
+  function resRange() {
+    const r = S.res; if (S.resField === 'disp') return { lo: 0, hi: r.maxD || 1, unit: 'mm', title: 'Déplacement', rev: false, val: n => r.dN[n] };
+    if (S.resField === 'fs') return { lo: 0, hi: 2 * S.fsTarget, unit: '', title: 'Facteur de sécurité', rev: true, val: n => S.mat.Sy / Math.max(r.vmN[n], 1e-9) };
+    return { lo: 0, hi: r.maxVm || 1, unit: 'MPa', title: 'Contrainte de von Mises', rev: false, val: n => r.vmN[n] };
+  }
+  function defScale() { const r = S.res; if (!S.showDef || !r || !r.maxD) return 0; return S.defMult * r.auto; }
+  function resBuffers() {
+    const r = S.res; if (!r) { setBuf('res', null); setBuf('resL', null); return; }
+    const g = resRange(), k = defScale();
+    const pos = faceBuffers('res', S.mesh.faces, n => { const t = (g.val(n) - g.lo) / (g.hi - g.lo); return g.rev ? 1 - t : t; }, r.u, k);
+    R.pick = { name: 'res', pos, quads: S.mesh.faces.quads, val: g.val, unit: g.unit };
+  }
+  function optBuffers() {
+    const x = S.opt.x; if (!x || !S.mesh) { setBuf('opt', null); setBuf('optL', null); return; }
+    const mask = new Uint8Array(S.mesh.ne); let n = 0; for (let e = 0; e < mask.length; e++) if (x[e] > S.opt.thr) { mask[e] = 1; n++; }
+    S.opt.faces = FEA.extractFaces(S.mesh, mask); S.opt.kept = n;
+    faceBuffers('opt', S.opt.faces, null, null, 0, [0.91, 0.52, 0.36]);
+  }
+
+  /* ================= Modèle ================= */
+  function toast(msg, info) { const t = $('#toast'); t.textContent = msg; t.className = 'on' + (info ? ' info' : ''); clearTimeout(toast.t); toast.t = setTimeout(() => t.className = '', info ? 2500 : 6000); }
+  function invalidate(meshToo) {
+    if (meshToo) { S.mesh = null; setBuf('mesh', null); setBuf('meshL', null); }
+    S.res = null; S.opt.x = null; S.opt.info = ''; R.pick = null; resBuffers(); optBuffers();
+  }
+  function applyUnit() {
+    const k = UNIT[S.unit]; S.tris = new Float32Array(S.raw.length); for (let i = 0; i < S.raw.length; i++) S.tris[i] = S.raw[i] * k;
+    S.gi = FEA.geomInfo(S.tris); S.surf = FEA.buildTopology(S.tris);
+    for (const b of S.bcs) b.c = centroid(b.tris);
+    invalidate(true); geoBuffers(); fit();
+  }
+  function defaultH() { const h = Math.cbrt(S.gi.volume / 15000); const p = Math.pow(10, Math.floor(Math.log10(h))); return Math.max(p / 10, Math.round(h / p * 10) / 10 * p); }
+  function loadGeometry(raw, name, unit) {
+    if (!raw || raw.length < 36) { toast('Fichier STL vide ou illisible.'); return false; }
+    S.raw = raw; S.name = name; S.unit = unit || 'mm'; S.bcs = []; S.activeBC = null; S.sel = new Uint8Array(raw.length / 9); S.hover = S.hoverMask = null; S.hoverSeed = -1;
+    applyUnit(); S.h = defaultH(); $('#empty').style.display = 'none'; S.tab = 'model'; ui(); return true;
+  }
+  function centroid(list) {
+    let A = 0, c = [0, 0, 0]; const T = S.tris, ar = S.surf.areas;
+    for (const t of list) { const a = ar[t] || 1e-12; A += a; for (let k = 0; k < 3; k++) c[k] += a * (T[t * 9 + k] + T[t * 9 + 3 + k] + T[t * 9 + 6 + k]) / 3; }
+    return c.map(v => v / (A || 1));
+  }
+  const selList = () => { const o = []; if (S.sel) for (let t = 0; t < S.sel.length; t++) if (S.sel[t]) o.push(t); return o; };
+  function addBC(type, tris) {
+    tris = tris || selList(); if (!tris.length) { toast('Sélectionnez d\'abord une ou plusieurs faces dans la vue 3D.'); return null; }
+    const set = new Set(tris); for (const b of S.bcs) b.tris = b.tris.filter(t => !set.has(t));
+    S.bcs = S.bcs.filter(b => b.tris.length);
+    const n = S.bcs.filter(b => b.type === type).length + 1;
+    const bc = { id: S.nextId++, type, name: (type === 'fix' ? 'Appui ' : type === 'disp' ? 'Déplacement ' : 'Force ') + n, tris, v: [0, 0, 0], free: [false, false, false], c: centroid(tris) };
+    S.bcs.push(bc); S.activeBC = bc.id; S.sel.fill(0); S.stale = !!S.res; S.tab = 'study'; geoColors(); ui(); return bc;
+  }
+  function genMesh() {
+    if (!S.tris) { toast('Chargez d\'abord une pièce.'); return false; }
+    if (!(S.h > 0)) { toast('Taille d\'élément invalide.'); return false; }
+    const est = S.gi.volume / S.h ** 3, cells = S.gi.size[0] * S.gi.size[1] * S.gi.size[2] / S.h ** 3;
+    if (est > 600000 || cells > 4e7) { toast('Maillage trop fin pour le navigateur (≈ ' + fmt(est) + ' éléments). Augmentez la taille d\'élément.'); return false; }
+    const vox = FEA.voxelize(S.tris, S.h);
+    if (!vox.count) { toast('Aucun élément créé : la taille d\'élément est trop grande pour cette pièce, ou le STL n\'est pas un volume fermé.'); return false; }
+    S.mesh = FEA.buildMesh(vox); S.res = null; S.opt.x = null; resBuffers(); optBuffers(); meshBuffers(); return true;
+  }
+  const frame = () => new Promise(r => setTimeout(r, 0));
+  function setProg(on, txt, frac) { $('#prog').classList.toggle('on', on); if (on) { $('#progT').textContent = txt; $('#progB').style.width = Math.round((frac || 0) * 100) + '%'; } }
+  function prepare() {
+    if (!S.tris) { toast('Chargez d\'abord une pièce.'); return null; }
+    if (!S.bcs.some(b => b.type !== 'force')) { toast('Ajoutez au moins un appui : sans appui, la pièce est libre de bouger.'); S.tab = 'study'; ui(); return null; }
+    if (!S.bcs.some(b => b.type === 'force' && Math.hypot(...b.v) > 0) && !S.bcs.some(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0))) { toast('Ajoutez au moins une force ou un déplacement imposé non nul.'); S.tab = 'study'; ui(); return null; }
+    if (!S.mesh || S.mesh.h !== S.h) { if (!genMesh()) return null; }
+    const list = [];
+    for (const b of S.bcs) {
+      const nodes = FEA.nodesNearTris(S.mesh, S.tris, b.tris, S.mesh.h);
+      if (!nodes.length) { toast('« ' + b.name + ' » ne touche aucun nœud du maillage. Affinez le maillage.'); return null; }
+      list.push({ type: b.type, nodes, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v });
+    }
+    const bc = FEA.buildBC(S.mesh, list), Ke = FEA.hexKe(S.mat.nu);
+    return { bc, Ke, list };
+  }
+  async function calc() {
+    if (S.busy) return; const p = prepare(); if (!p) return;
+    S.busy = true; S.cancel = false; ui(); const m = S.mesh, t0 = performance.now();
+    setProg(true, 'Résolution…', 0); await frame();
+    const scale = new Float64Array(m.ne).fill(S.mat.E * m.h), tol = 1e-6;
+    const r = await FEA.pcg({ mesh: m, Ke: p.Ke, scale, fixed: p.bc.fixed, x: p.bc.x, f: p.bc.f, tol, tick: async (it, res) => { setProg(true, 'Résolution — itération ' + it + ' · résidu ' + res.toExponential(1), Math.min(1, Math.log10(1 / res) / 6)); await frame(); return !S.cancel; } });
+    setProg(false); S.busy = false;
+    if (r.cancelled) { toast('Calcul arrêté.', true); ui(); return; }
+    if (!r.converged) { toast('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.'); ui(); return; }
+    S.res = FEA.computeResults(m, S.mat.E, S.mat.nu, p.bc.x);
+    S.res.auto = S.res.maxD ? 0.05 * Math.hypot(...S.gi.size) / S.res.maxD : 0; S.res.iter = r.iter; S.res.time = (performance.now() - t0) / 1000;
+    S.stale = false; S.tab = 'results'; resBuffers(); ui();
+  }
+  async function runOpt() {
+    if (S.busy) return; const p = prepare(); if (!p) return;
+    const m = S.mesh, passive = new Uint8Array(m.ne), mk = new Uint8Array(m.nn);
+    for (const b of p.list) for (const n of b.nodes) mk[n] = 1;
+    for (let e = 0; e < m.ne; e++) for (let a = 0; a < 8; a++) if (mk[m.conn[e * 8 + a]]) { passive[e] = 1; break; }
+    S.busy = true; S.cancel = false; S.tab = 'opt'; ui(); setProg(true, 'Optimisation — itération 1', 0); await frame();
+    const iters = Math.max(5, Math.min(200, S.opt.iters | 0));
+    const r = await FEA.topopt({
+      mesh: m, Ke: p.Ke, E: S.mat.E, fixed: p.bc.fixed, x0: p.bc.x, f: p.bc.f, passive, volfrac: Math.max(0.1, Math.min(0.9, S.opt.vf / 100)), iters,
+      tick: async (it, i, res) => { setProg(true, 'Optimisation — itération ' + it + ' / ' + iters + ' · solveur ' + i, (it - 1) / iters); await frame(); return !S.cancel; },
+      onIter: async (it, x) => { S.opt.x = Float64Array.from(x); optBuffers(); setProg(true, 'Optimisation — itération ' + it + ' / ' + iters, it / iters); await frame(); return !S.cancel; }
+    });
+    setProg(false); S.busy = false; S.opt.x = Float64Array.from(r.x); S.opt.info = r.cancelled ? 'Arrêtée à l\'itération ' + r.iter : 'Terminée en ' + r.iter + ' itérations'; optBuffers(); ui();
+  }
+
+  /* ---------- fichiers ---------- */
+  function download(name, data, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
+  function b64(f32) { const u = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength); let s = ''; for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); }
+  function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Float32Array(u.buffer); }
+  function save() {
+    if (!S.raw) { toast('Rien à enregistrer : chargez d\'abord une pièce.'); return; }
+    const o = { app: 'aef3d', version: 1, name: S.name, unit: S.unit, tris: b64(S.raw), matIdx: S.matIdx, mat: S.mat, h: S.h, fsTarget: S.fsTarget, forceUnit: S.forceUnit, selMode: S.selMode, selTol: S.selTol, opt: { vf: S.opt.vf, iters: S.opt.iters }, bcs: S.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free })) };
+    download(S.name.replace(/\.[^.]+$/, '') + '.aef.json', JSON.stringify(o), 'application/json');
+  }
+  function openFile(file) {
+    const rd = new FileReader();
+    rd.onload = () => {
+      try {
+        if (/\.json$/i.test(file.name)) {
+          const o = JSON.parse(new TextDecoder().decode(rd.result)); if (o.app !== 'aef3d') throw new Error('format');
+          if (!loadGeometry(unb64(o.tris), o.name, o.unit)) return;
+          S.matIdx = o.matIdx; S.mat = o.mat; S.h = o.h; S.fsTarget = o.fsTarget || 1.5; S.forceUnit = o.forceUnit || 'N'; S.selMode = o.selMode || 'auto'; S.selTol = o.selTol || 20; Object.assign(S.opt, o.opt || {});
+          S.bcs = o.bcs.map(b => Object.assign({ id: S.nextId++, c: centroid(b.tris) }, b)); geoColors(); ui();
+        } else loadGeometry(FEA.parseSTL(rd.result), file.name);
+      } catch (err) { toast('Impossible de lire ce fichier (' + err.message + ').'); }
+    };
+    rd.readAsArrayBuffer(file);
+  }
+  function exportOptSTL() {
+    const f = S.opt.faces; if (!f || !f.n) return; const X = S.mesh.coords, buf = new ArrayBuffer(84 + f.n * 100), dv = new DataView(buf); dv.setUint32(80, f.n * 2, true); let o = 84;
+    for (let i = 0; i < f.n; i++) for (const tri of [[0, 1, 2], [0, 2, 3]]) {
+      const N = FEA.FACE_N[f.dir[i]]; for (let k = 0; k < 3; k++) dv.setFloat32(o + k * 4, N[k], true); o += 12;
+      for (const v of tri) { const n = f.quads[i * 4 + v]; for (let k = 0; k < 3; k++) dv.setFloat32(o + k * 4, X[n * 3 + k], true); o += 12; } o += 2;
+    }
+    download(S.name.replace(/\.[^.]+$/, '') + '_optimise.stl', buf, 'model/stl');
+  }
+  function loadDemo() {
+    const d = FEA.demoLink(); if (!loadGeometry(d.tris, 'Biellette (exemple)')) return;
+    S.matIdx = 0; S.mat = Object.assign({}, MATS[0]); S.h = 2;
+    addBC('fix', d.holeL).name = 'Appui 1'; const f = addBC('force', d.holeR); f.v = [12000, 0, 0];
+    S.activeBC = null; S.tab = 'model'; geoColors(); ui();
+  }
+
+  /* ================= Interface ================= */
+  const fU = () => S.forceUnit === 'lbf' ? LBF : 1;
+  const num = (path, val, step, extra) => `<input type="number" data-set="${path}" value="${val}" step="${step || 'any'}" ${extra || ''}>`;
+  function checks() {
+    const sup = S.bcs.filter(b => b.type !== 'force').length, ld = S.bcs.filter(b => b.type === 'force' && Math.hypot(...b.v) > 0).length + S.bcs.filter(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0)).length;
+    return { geo: !!S.tris, mesh: !!S.mesh && S.mesh.h === S.h, sup, ld, ready: !!S.tris && sup > 0 && ld > 0 };
+  }
+  function panelModel() {
+    let h = `<div class="sec">GÉOMÉTRIE</div><div class="btns"><button class="btn" data-act="import">Importer un STL…</button><button class="btn" data-act="demo">Charger l'exemple</button></div>`;
+    if (S.tris) {
+      const g = S.gi, mass = g.volume * S.mat.rho * 1e-9;
+      h += `<div class="card"><div class="row"><span>Triangles</span><span class="val">${fmt(S.surf.nt, 6)}</span></div>
+      <div class="row"><span>Dimensions (mm)</span><span class="val">${fmt(g.size[0], 4)} × ${fmt(g.size[1], 4)} × ${fmt(g.size[2], 4)}</span></div>
+      <div class="row"><span>Volume</span><span class="val">${fmt(g.volume / 1000, 4)} cm³</span></div>
+      <div class="row"><span>Masse</span><span class="val">${fmt(mass, 3)} kg</span></div>
+      <div class="row"><span>Unité du fichier STL</span><select data-set="unit">${Object.keys(UNIT).map(u => `<option ${u === S.unit ? 'selected' : ''}>${u}</option>`).join('')}</select></div></div>
+      <div class="mut small">Vérifiez les dimensions : un STL ne contient pas d'unité. Si la pièce est 25,4 fois trop petite, choisissez « po ».</div>`;
+    } else h += `<div class="mut small">Dans SolidWorks : Fichier › Enregistrer sous › STL (*.stl), puis Options › résolution « Fine » et unité « Millimètres ».</div>`;
+    h += `<div class="sec">MATÉRIAU</div><select data-set="matIdx" data-num="1">${MATS.map((m, i) => `<option value="${i}" ${i === S.matIdx ? 'selected' : ''}>${m.n}</option>`).join('')}</select>
+    <div class="card"><div class="row"><span>Module d'Young E (MPa)</span>${num('mat.E', S.mat.E)}</div><div class="row"><span>Coefficient de Poisson ν</span>${num('mat.nu', S.mat.nu, 0.01)}</div>
+    <div class="row"><span>Limite élastique Re (MPa)</span>${num('mat.Sy', S.mat.Sy)}</div><div class="row"><span>Masse volumique (kg/m³)</span>${num('mat.rho', S.mat.rho)}</div></div>`;
+    return h;
+  }
+  function panelMesh() {
+    if (!S.tris) return `<div class="sec">MAILLAGE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
+    const est = S.gi.volume / S.h ** 3, mn = Math.min(...S.gi.size);
+    let h = `<div class="sec">MAILLAGE <span class="tag">VOXELS</span></div><div class="card"><div class="row"><span>Taille d'élément (mm)</span>${num('h', S.h)}</div>
+    <div class="row"><span>Éléments estimés</span><span class="val">≈ ${fmt(est, 2)}</span></div><div class="row"><span>Éléments dans la plus petite dimension</span><span class="val">${fmt(mn / S.h, 2)}</span></div></div>
+    <div class="btns"><button class="btn" data-act="hfine">Plus fin</button><button class="btn" data-act="hcoarse">Plus grossier</button></div>
+    <button class="btn primary wide" data-act="mesh">Générer le maillage</button>
+    <div class="mut small" style="margin-top:10px">Visez au moins 3 à 4 éléments dans l'épaisseur des zones chargées. Jusqu'à environ 100 000 éléments, le calcul reste confortable ; au-delà, il devient long.</div>`;
+    if (S.mesh) h += `<div class="sec">MAILLAGE ACTUEL</div><div class="card"><div class="row"><span>Éléments</span><span class="val">${fmt(S.mesh.ne, 7)}</span></div><div class="row"><span>Nœuds</span><span class="val">${fmt(S.mesh.nn, 7)}</span></div>
+    <div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(S.mesh.ne * S.mesh.h ** 3 / S.gi.volume * 100, 4)} %</span></div></div>${S.mesh.h !== S.h ? '<div class="chk"><i class="wn"></i><span>La taille a changé : régénérez le maillage.</span></div>' : ''}`;
+    return h;
+  }
+  function chips(types) {
+    const l = S.bcs.filter(b => types.includes(b.type));
+    return l.length ? `<div class="chips">${l.map(b => `<span class="chip ${b.id === S.activeBC ? 'on' : ''}" data-act="bc" data-id="${b.id}"><i style="background:${hex(BCC[b.type])}"></i>${esc(b.name)}</span>`).join('')}</div>` : `<div class="mut small">Aucun pour l'instant.</div>`;
+  }
+  function panelStudy() {
+    if (!S.tris) return `<div class="sec">ÉTUDE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
+    const c = checks(), k = fU();
+    let h = `<div class="sec">APPUIS <b>${S.bcs.filter(b => b.type !== 'force').length}</b></div>${chips(['fix', 'disp'])}<div class="sec">CHARGES <b>${S.bcs.filter(b => b.type === 'force').length}</b></div>${chips(['force'])}`;
+    const b = S.bcs.find(x => x.id === S.activeBC);
+    if (b) {
+      h += `<div class="card active"><label class="f" style="margin-top:0">${BCN[b.type]} · ${b.tris.length} triangle(s)</label><input type="text" data-set="bc.name" value="${esc(b.name)}">`;
+      if (b.type === 'force') {
+        h += ['X', 'Y', 'Z'].map((a, i) => `<div class="row"><span>Force ${a} (${S.forceUnit})</span>${num('bc.f' + i, +(b.v[i] / k).toPrecision(8))}</div>`).join('') +
+          `<div class="row"><span>Résultante</span><span class="val">${fmt(Math.hypot(...b.v) / k, 5)} ${S.forceUnit}</span></div><div class="row"><span>Unité de force</span><select data-set="forceUnit"><option ${S.forceUnit === 'N' ? 'selected' : ''}>N</option><option ${S.forceUnit === 'lbf' ? 'selected' : ''}>lbf</option></select></div>
+          <div class="mut small">Force totale, répartie uniformément sur les faces choisies.</div>`;
+      } else if (b.type === 'disp') {
+        h += ['X', 'Y', 'Z'].map((a, i) => `<div class="row"><span><input type="checkbox" data-set="bc.fix${i}" ${b.free[i] ? '' : 'checked'}> Imposer ${a} (mm)</span>${num('bc.d' + i, b.v[i], 'any', b.free[i] ? 'disabled' : '')}</div>`).join('') + `<div class="mut small">Décochez un axe pour le laisser libre.</div>`;
+      } else h += `<div class="mut small" style="margin-top:8px">Les faces choisies sont bloquées dans les trois directions (encastrement).</div>`;
+      h += `<div class="btns"><button class="btn" data-act="bcsel">Reprendre ses faces en sélection</button><button class="btn danger" data-act="bcdel">Supprimer</button></div></div>`;
+    } else h += `<div class="mut small" style="margin-top:12px">Cliquez une ou plusieurs faces dans la vue, puis créez un appui ou une charge avec les boutons du panneau de droite. Cliquez une étiquette ci-dessus pour la modifier.</div>`;
+    h += `<div class="sec">PRÊT POUR LE CALCUL ?</div>
+    <div class="chk"><i class="${c.geo ? '' : 'no'}"></i><span>Pièce chargée · matériau : ${esc(S.mat.n)}</span></div>
+    <div class="chk"><i class="${c.mesh ? '' : 'wn'}"></i><span>${c.mesh ? fmt(S.mesh.ne, 7) + ' éléments' : 'Le maillage sera généré automatiquement (taille ' + fmt(S.h) + ' mm)'}</span></div>
+    <div class="chk"><i class="${c.sup ? '' : 'no'}"></i><span>${c.sup} appui(s)</span></div><div class="chk"><i class="${c.ld ? '' : 'no'}"></i><span>${c.ld} charge(s) non nulle(s)</span></div>
+    <button class="btn primary wide" data-act="calc" style="margin-top:8px" ${S.busy ? 'disabled' : ''}>Calculer</button>`;
+    return h;
+  }
+  function panelResults() {
+    const r = S.res; if (!r) return `<div class="sec">RÉSULTATS</div><div class="mut">Aucun résultat. Définissez l'étude puis lancez le calcul.</div><button class="btn primary wide" data-act="calc" style="margin-top:12px">Calculer</button>`;
+    const fs = S.mat.Sy / r.maxVm, fs99 = S.mat.Sy / r.p99, cls = fs >= S.fsTarget ? 'ok' : fs >= 1 ? 'wn' : 'no';
+    const msg = cls === 'ok' ? 'La pièce résiste' : cls === 'wn' ? 'Marge insuffisante' : 'Plastification prévue';
+    const sub = cls === 'ok' ? 'Le facteur de sécurité minimal dépasse la valeur visée.' : cls === 'wn' ? 'La contrainte reste sous la limite élastique, mais sous le facteur visé.' : 'La contrainte maximale dépasse la limite élastique du matériau.';
+    return `${S.stale ? '<div class="verdict wn">Résultats périmés<small>L\'étude a changé depuis le dernier calcul. Relancez « Calculer ».</small></div>' : ''}
+    <div class="sec">BILAN</div><div class="verdict ${cls}">${msg} · FS = ${fmt(fs, 3)}<small>${sub}</small></div>
+    <div class="card"><div class="row"><span>von Mises maximale</span><span class="val">${fmt(r.maxVm, 4)} MPa</span></div><div class="row"><span>von Mises, 99ᵉ centile</span><span class="val">${fmt(r.p99, 4)} MPa</span></div>
+    <div class="row"><span>Limite élastique</span><span class="val">${fmt(S.mat.Sy, 4)} MPa</span></div><div class="row"><span>FS au 99ᵉ centile</span><span class="val">${fmt(fs99, 3)}</span></div>
+    <div class="row"><span>Déplacement maximal</span><span class="val">${fmt(r.maxD, 4)} mm</span></div><div class="row"><span>Facteur de sécurité visé</span>${num('fsTarget', S.fsTarget, 0.1)}</div></div>
+    <div class="sec">AFFICHAGE</div><div class="seg full"><button data-res="vm" class="${S.resField === 'vm' ? 'on' : ''}">von Mises</button><button data-res="disp" class="${S.resField === 'disp' ? 'on' : ''}">Déplacement</button><button data-res="fs" class="${S.resField === 'fs' ? 'on' : ''}">Sécurité</button></div>
+    <div class="row" style="margin-top:12px"><span><input type="checkbox" data-set="showDef" ${S.showDef ? 'checked' : ''}> Afficher la déformée</span></div>
+    <div class="row"><span>Amplification (× auto)</span>${num('defMult', S.defMult, 0.5)}</div>
+    <div class="sec">À SAVOIR</div><div class="mut small">Le maillage en voxels crée des marches sur les surfaces courbes : la valeur maximale peut y être surestimée localement, ainsi qu'au bord des appuis. Comparez-la au 99ᵉ centile et affinez le maillage pour confirmer : si le maximum monte sans cesse en affinant, c'est un pic numérique.<br><br>${fmt(S.mesh.ne, 7)} éléments · ${r.iter} itérations · ${fmt(r.time, 2)} s</div>`;
+  }
+  function panelOpt() {
+    if (!S.tris) return `<div class="sec">OPTIMISATION TOPOLOGIQUE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
+    let h = `<div class="sec">OPTIMISATION TOPOLOGIQUE</div><div class="mut small">Cherche où enlever de la matière pour garder la pièce la plus rigide possible sous les charges de l'étude. Les zones d'appui et de charge sont conservées.</div>
+    <div class="card"><div class="row"><span>Matière à conserver (%)</span>${num('opt.vf', S.opt.vf, 5, 'min="10" max="90"')}</div><div class="row"><span>Itérations maximales</span>${num('opt.iters', S.opt.iters, 5, 'min="5" max="200"')}</div></div>
+    <button class="btn primary wide" data-act="opt" ${S.busy ? 'disabled' : ''}>Lancer l'optimisation</button>
+    <div class="mut small" style="margin-top:10px">Chaque itération refait un calcul complet : utilisez un maillage modéré (10 000 à 30 000 éléments).</div>`;
+    if (S.opt.x) {
+      const kept = S.opt.kept || 0;
+      h += `<div class="sec">RÉSULTAT</div><div class="card"><div class="row"><span>État</span><span class="val">${esc(S.opt.info || 'En cours…')}</span></div>
+      <div class="row"><span>Matière conservée</span><span class="val">${fmt(kept / S.mesh.ne * 100, 3)} %</span></div><div class="row"><span>Masse</span><span class="val">${fmt(kept * S.mesh.h ** 3 * S.mat.rho * 1e-9, 3)} kg</span></div>
+      <label class="f">Seuil de densité affiché : ${fmt(S.opt.thr, 2)}</label><input type="range" min="0.05" max="0.95" step="0.05" value="${S.opt.thr}" data-set="opt.thr"></div>
+      <button class="btn wide" data-act="optstl">Exporter la forme en STL</button><div class="mut small" style="margin-top:10px">La forme obtenue est un guide : redessinez la pièce dans SolidWorks en vous en inspirant, puis revérifiez-la avec une analyse.</div>`;
+    }
+    return h;
+  }
+  function rightPanel() {
+    if (!selectable()) return `<div class="sec">${S.tab === 'results' ? 'SONDE' : 'VUE'}</div><div class="mut">${S.tab === 'results' && S.res ? 'Survolez la pièce pour lire la valeur au point visé ; elle s\'affiche dans la légende.' : 'La sélection de faces se fait dans les onglets Modèle et Étude.'}</div>`;
+    let n = 0, A = 0; for (let t = 0; t < S.sel.length; t++) if (S.sel[t]) { n++; A += S.surf.areas[t]; }
+    return `<div class="seg full"><button data-mode="auto" class="${S.selMode === 'auto' ? 'on' : ''}">Auto</button><button data-mode="plane" class="${S.selMode === 'plane' ? 'on' : ''}">Plane</button><button data-mode="tangent" class="${S.selMode === 'tangent' ? 'on' : ''}">Tangente</button></div>
+    <p class="mut" style="margin:12px 0">Cliquez une face dans la vue. <kbd>Ctrl</kbd> ou <kbd>Maj</kbd> + clic pour en ajouter ou en retirer.</p>
+    <div class="row"><span>Angle de tangence (°)</span>${num('selTol', S.selTol, 1, 'min="1" max="60"')}</div>
+    <div class="sec">SÉLECTION</div>${n ? `<div class="card"><div class="row"><span>Triangles</span><span class="val">${fmt(n, 6)}</span></div><div class="row"><span>Aire</span><span class="val">${fmt(A, 4)} mm²</span></div></div>` : '<div class="mut small">Aucune face sélectionnée.</div>'}
+    <div class="btns"><button class="btn" data-act="addfix" ${n ? '' : 'disabled'}>Appui fixe</button><button class="btn" data-act="adddisp" ${n ? '' : 'disabled'}>Déplacement imposé</button><button class="btn" data-act="addforce" ${n ? '' : 'disabled'}>Force</button></div>
+    <div class="btns"><button class="btn" data-act="clearsel" ${n ? '' : 'disabled'}>Vider la sélection</button></div>
+    <div class="sec">MODES</div><div class="mut small"><b style="color:#c5cfdb">Auto</b> : face plane, ou surface courbe entière (alésage, congé).<br><b style="color:#c5cfdb">Plane</b> : uniquement les triangles coplanaires.<br><b style="color:#c5cfdb">Tangente</b> : s'étend tant que l'angle entre triangles voisins reste sous la limite.</div>`;
+  }
+  function legend() {
+    const L = $('#legend'); let h = '';
+    if (S.tab === 'results' && S.res) {
+      const g = resRange();
+      h = `<div class="t">${g.title} ${g.unit ? '<span>(' + g.unit + ')</span>' : ''}</div><div class="bar ${g.rev ? 'rev' : ''}"></div><div class="mm"><span>${fmt(g.lo, 3)}</span><span>${g.rev ? '≥ ' : ''}${fmt(g.hi, 3)}</span></div>
+      <div class="ln"><i style="background:#eb503c"></i>Déformée × ${fmt(defScale(), 3)}</div><div class="mut" style="margin-top:6px">${S.probe ? 'Au point visé : <b style="color:#fff">' + S.probe + '</b>' : 'Survolez la pièce pour lire la valeur.'}</div>`;
+    } else if (S.tab === 'opt' && S.opt.x) h = `<div class="t">Forme optimisée</div><div class="ln"><i style="background:#e8855c"></i>Matière conservée (densité > ${fmt(S.opt.thr, 2)})</div>`;
+    else if ((S.tab === 'mesh' || S.tab === 'results' || S.tab === 'opt') && S.mesh) h = `<div class="t">Maillage <span>(voxels de ${fmt(S.mesh.h)} mm)</span></div><div class="ln"><i style="background:#809ec7"></i>${fmt(S.mesh.ne, 7)} éléments</div>`;
+    else if (S.tris) h = `<div class="t">Géométrie</div><div class="ln"><i style="background:#e8734f"></i>Sélection</div><div class="ln"><i style="background:${hex(BCC.fix)}"></i>Appui fixe</div><div class="ln"><i style="background:${hex(BCC.disp)}"></i>Déplacement imposé</div><div class="ln"><i style="background:${hex(BCC.force)}"></i>Force</div>`;
+    L.innerHTML = h; L.style.display = h ? '' : 'none';
+  }
+  function ui() {
+    const c = checks(), ok = { model: c.geo, mesh: c.mesh, study: c.sup > 0 && c.ld > 0, results: !!S.res && !S.stale, opt: !!S.opt.x };
+    $('#steps').innerHTML = TABS.map(([k, n]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><span class="dot ${ok[k] ? 'ok' : (k === 'results' && S.res ? 'warn' : '')}">${ok[k] ? '✓' : ''}</span>${n}</button>`).join('');
+    $('#panel').innerHTML = { model: panelModel, mesh: panelMesh, study: panelStudy, results: panelResults, opt: panelOpt }[S.tab]();
+    $('#right').innerHTML = rightPanel(); $('#fname').textContent = S.name;
+    $('#stL').textContent = S.mesh ? fmt(S.mesh.nn, 7) + ' nœuds · ' + fmt(S.mesh.ne, 7) + ' éléments' : S.tris ? fmt(S.surf.nt, 7) + ' triangles' : 'Aucune pièce';
+    $('#stR').textContent = 'Axe vertical Y · mm · ' + S.forceUnit + ' · MPa';
+    legend(); R.need = true;
+  }
+
+  /* ---------- événements ---------- */
+  const ACT = {
+    open: () => $('#file').click(), import: () => $('#file').click(), demo: loadDemo, save, calc, fit, stop: () => { S.cancel = true; },
+    menu: () => $('#viewMenu').classList.toggle('open'), help,
+    mesh: () => { if (genMesh()) ui(); }, hfine: () => { S.h = +(S.h / 1.25).toPrecision(3); ui(); }, hcoarse: () => { S.h = +(S.h * 1.25).toPrecision(3); ui(); },
+    addfix: () => addBC('fix'), adddisp: () => addBC('disp'), addforce: () => addBC('force'), clearsel: () => { S.sel.fill(0); geoColors(); ui(); },
+    bc: el => { const id = +el.dataset.id; S.activeBC = S.activeBC === id ? null : id; geoColors(); ui(); },
+    bcdel: () => { S.bcs = S.bcs.filter(b => b.id !== S.activeBC); S.activeBC = null; S.stale = !!S.res; geoColors(); ui(); },
+    bcsel: () => { const b = S.bcs.find(x => x.id === S.activeBC); if (b) { S.sel.fill(0); for (const t of b.tris) S.sel[t] = 1; geoColors(); ui(); } },
+    opt: runOpt, optstl: exportOptSTL, closemodal: () => $('#modal').classList.remove('on')
+  };
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-act],[data-tab],[data-view],[data-res],[data-mode]');
+    if (!e.target.closest('.menu')) $('#viewMenu').classList.remove('open');
+    if (!t || t.disabled) return; const d = t.dataset;
+    if (d.act) { if (S.busy && d.act !== 'stop' && d.act !== 'help' && d.act !== 'closemodal' && d.act !== 'menu' && d.act !== 'fit') return; ACT[d.act](t); }
+    else if (d.tab) { S.tab = d.tab; S.probe = null; geoColors(); ui(); }
+    else if (d.view) setView(d.view);
+    else if (d.res) { S.resField = d.res; S.probe = null; resBuffers(); ui(); }
+    else if (d.mode) { S.selMode = d.mode; S.hoverSeed = -1; S.hoverMask = null; ui(); }
+  });
+  document.addEventListener('change', e => {
+    const el = e.target, p = el.dataset.set; if (!p) return;
+    const v = el.type === 'checkbox' ? el.checked : (el.type === 'number' || el.type === 'range' || el.dataset.num) ? parseFloat(el.value) : el.value;
+    if ((el.type === 'number' || el.type === 'range') && !isFinite(v)) { ui(); return; }
+    const b = S.bcs.find(x => x.id === S.activeBC);
+    if (p.startsWith('bc.')) {
+      if (!b) return; const k = p.slice(3);
+      if (k === 'name') b.name = v || b.name; else if (k[0] === 'f' && k.length === 2) b.v[+k[1]] = v * fU(); else if (k[0] === 'd') b.v[+k[1]] = v; else if (k.startsWith('fix')) b.free[+k[3]] = !v;
+      if (k !== 'name') S.stale = !!S.res;
+    } else if (p === 'unit') { S.unit = v; applyUnit(); S.h = defaultH(); }
+    else if (p === 'matIdx') { S.matIdx = v; S.mat = Object.assign({}, MATS[v]); S.stale = !!S.res; }
+    else if (p.startsWith('mat.')) { const k = p.slice(4); if (!(v > 0) || (k === 'nu' && v >= 0.499)) { toast('Valeur de matériau invalide.'); ui(); return; } S.mat[k] = v; S.matIdx = MATS.length - 1; S.mat.n = 'Personnalisé'; if (k === 'E' || k === 'nu') S.stale = !!S.res; }
+    else if (p.startsWith('opt.')) { S.opt[p.slice(4)] = v; if (p === 'opt.thr') optBuffers(); }
+    else if (p === 'h') { if (v > 0) S.h = v; }
+    else if (p === 'selTol') { S.selTol = Math.max(1, Math.min(60, v)); S.hoverSeed = -1; S.hoverMask = null; }
+    else if (p === 'fsTarget') { if (v > 0) S.fsTarget = v; resBuffers(); }
+    else { S[p] = v; if (p === 'showDef' || p === 'defMult') resBuffers(); }
+    ui();
+  });
+  $('#file').addEventListener('change', e => { if (e.target.files[0]) openFile(e.target.files[0]); e.target.value = ''; });
+  const view = $('#view');
+  view.addEventListener('dragover', e => e.preventDefault());
+  view.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0] && !S.busy) openFile(e.dataTransfer.files[0]); });
+  window.addEventListener('keydown', e => { if (e.key === 'Escape') { $('#modal').classList.remove('on'); if (S.sel && selectable() && !/INPUT|SELECT/.test(document.activeElement.tagName)) { S.sel.fill(0); geoColors(); ui(); } } });
+  function help() {
+    $('#modal').innerHTML = `<div class="box"><h2>Analyse éléments finis 3D — aide</h2>
+    <h3>Déroulement</h3><ol><li><b>Modèle</b> : importez le STL de la pièce, vérifiez les dimensions et choisissez le matériau.</li><li><b>Maillage</b> : réglez la taille d'élément et générez le maillage.</li><li><b>Étude</b> : cliquez les faces dans la vue, puis créez les appuis et les forces (panneau de droite).</li><li><b>Calculer</b>, puis lisez le bilan dans <b>Résultats</b>.</li><li><b>Optimisation</b> (facultatif) : cherchez la matière inutile sous le même cas de charge.</li></ol>
+    <h3>Exporter depuis SolidWorks</h3><p>Fichier › Enregistrer sous › STL (*.stl). Dans Options : unité « Millimètres », résolution « Fine ». Une résolution fine donne des alésages plus ronds et des sélections de faces plus propres.</p>
+    <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>La pièce est découpée en petits cubes (voxels) ; plus ils sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies.</li></ul>
+    <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis et sur les marches du maillage sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
+    <h3>Souris</h3><p>Clic gauche : tourner · clic droit : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p>
+    <div class="btns" style="justify-content:flex-end"><button class="btn primary" data-act="closemodal">Fermer</button></div></div>`;
+    $('#modal').classList.add('on');
+  }
+  $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') e.target.classList.remove('on'); });
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => { });
+  ui();
+})();
+</script>
+</body></html>
