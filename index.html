@@ -537,6 +537,7 @@ const FEA = (function () {
   }
 
   /* ---------- Conditions aux limites ---------- */
+  const CP = new Float64Array(3); /* point le plus proche trouvé par d2PointTri */
   function d2PointTri(px, py, pz, T, i) {
     const ax = T[i], ay = T[i + 1], az = T[i + 2], bx = T[i + 3], by = T[i + 4], bz = T[i + 5], cx = T[i + 6], cy = T[i + 7], cz = T[i + 8];
     const abx = bx - ax, aby = by - ay, abz = bz - az, acx = cx - ax, acy = cy - ay, acz = cz - az, apx = px - ax, apy = py - ay, apz = pz - az;
@@ -564,6 +565,7 @@ const FEA = (function () {
         }
       }
     }
+    CP[0] = qx; CP[1] = qy; CP[2] = qz;
     return (px - qx) * (px - qx) + (py - qy) * (py - qy) + (pz - qz) * (pz - qz);
   }
 
@@ -828,9 +830,602 @@ const FEA = (function () {
     return { tris, holeL, holeR };
   }
 
-  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, surfaceLoad, surfaceInterp, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N };
+  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, surfaceLoad, surfaceInterp, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N, _i: { d2PointTri, CP, mgSetup, vcycle, buildBC } };
 })();
 if (typeof module !== 'undefined') module.exports = FEA;
+
+/* Module tétraèdres : mailleur (treillis de Kuhn découpé par la surface, sommets proches ramenés sur la surface),
+   éléments quadratiques à 10 nœuds calculés à la volée, gradient conjugué préconditionné par lissage de
+   Tchebychev + correction sur la grille de cellules coupées (multigrille), contact, contraintes. */
+(function (F) {
+  'use strict';
+  const I = F._i, CP = I.CP, d2 = I.d2PointTri;
+  const MID = [[-1, 4, 5, 6], [4, -1, 7, 8], [5, 7, -1, 9], [6, 8, 9, -1]];
+  const EDG = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+  const GA = 0.5854101966249685, GB = 0.1381966011250105;
+  const GP = [[GA, GB, GB, GB], [GB, GA, GB, GB], [GB, GB, GA, GB], [GB, GB, GB, GA]];
+
+  /* gradients des 10 fonctions de forme d'un élément courbe au point (L1,L2,L3) ; XE = coordonnées des nœuds ;
+     résultat dans DN, retourne le déterminant du jacobien */
+  const XE = new Float64Array(30), DNL = new Float64Array(30), DN = new Float64Array(30);
+  function isoGrad(L1, L2, L3) {
+    const L0 = 1 - L1 - L2 - L3, Ls = [L0, L1, L2, L3]; DNL.fill(0);
+    for (let k = 1; k <= 3; k++) {
+      DNL[k - 1] = -(4 * L0 - 1); DNL[k * 3 + k - 1] = 4 * Ls[k] - 1;
+      for (let j = 1; j <= 3; j++) DNL[MID[0][j] * 3 + k - 1] = 4 * (-Ls[j] + (j === k ? L0 : 0));
+      for (let i = 1; i <= 3; i++) for (let j = i + 1; j <= 3; j++) DNL[MID[i][j] * 3 + k - 1] = 4 * ((i === k ? Ls[j] : 0) + (j === k ? Ls[i] : 0));
+    }
+    let j00 = 0, j01 = 0, j02 = 0, j10 = 0, j11 = 0, j12 = 0, j20 = 0, j21 = 0, j22 = 0;
+    for (let a = 0; a < 10; a++) { const x = XE[a * 3], y = XE[a * 3 + 1], z = XE[a * 3 + 2], d0 = DNL[a * 3], d1 = DNL[a * 3 + 1], d2_ = DNL[a * 3 + 2]; j00 += x * d0; j01 += x * d1; j02 += x * d2_; j10 += y * d0; j11 += y * d1; j12 += y * d2_; j20 += z * d0; j21 += z * d1; j22 += z * d2_; }
+    const det = j00 * (j11 * j22 - j12 * j21) - j01 * (j10 * j22 - j12 * j20) + j02 * (j10 * j21 - j11 * j20), id = 1 / det;
+    /* inverse de J (J[r][k] = dx_r/dξ_k) ; dN/dx_r = Σ_k dN/dξ_k · Jinv[k][r] */
+    const i00 = (j11 * j22 - j12 * j21) * id, i01 = (j02 * j21 - j01 * j22) * id, i02 = (j01 * j12 - j02 * j11) * id, i10 = (j12 * j20 - j10 * j22) * id, i11 = (j00 * j22 - j02 * j20) * id, i12 = (j02 * j10 - j00 * j12) * id, i20 = (j10 * j21 - j11 * j20) * id, i21 = (j01 * j20 - j00 * j21) * id, i22 = (j00 * j11 - j01 * j10) * id;
+    for (let a = 0; a < 10; a++) { const d0 = DNL[a * 3], d1 = DNL[a * 3 + 1], d2_ = DNL[a * 3 + 2]; DN[a * 3] = d0 * i00 + d1 * i10 + d2_ * i20; DN[a * 3 + 1] = d0 * i01 + d1 * i11 + d2_ * i21; DN[a * 3 + 2] = d0 * i02 + d1 * i12 + d2_ * i22; }
+    return det;
+  }
+
+  /* ---------- Mailleur ---------- */
+  let USE_ONCUT = false, OFFS = 1; const DBG = {};
+  function tetMesh(tris, h, hex, topo) {
+    const gi = F.geomInfo(tris), n = [0, 0, 0], o = [0, 0, 0];
+    /* treillis décalé d'une fraction quelconque de h : les faces planes de la pièce ne tombent pas sur ses plans */
+    const SH = [0.37, 0.29, 0.43];
+    for (let c = 0; c < 3; c++) { n[c] = Math.max(1, Math.ceil(gi.size[c] / h + SH[c] * OFFS + 1e-6)); o[c] = gi.min[c] - SH[c] * OFFS * h; }
+    const [nx, ny, nz] = n, [ox, oy, oz] = o, mx = nx + 1, my = ny + 1, mz = nz + 1, NN = mx * my * mz, ntS = tris.length / 9;
+    /* 1. sommets du treillis à l'intérieur de la pièce (rayons selon z) */
+    const cnt = new Int32Array(mx * my + 1), px = h * 1.37e-4, py = h * 2.11e-4; let zs = null;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < tris.length; i += 9) {
+        const ax = tris[i], ay = tris[i + 1], az = tris[i + 2], bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5], cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+        const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay); if (Math.abs(d) < 1e-14) continue;
+        const i0 = Math.max(0, Math.ceil((Math.min(ax, bx, cx) - ox - px) / h)), i1 = Math.min(nx, Math.floor((Math.max(ax, bx, cx) - ox - px) / h));
+        const j0 = Math.max(0, Math.ceil((Math.min(ay, by, cy) - oy - py) / h)), j1 = Math.min(ny, Math.floor((Math.max(ay, by, cy) - oy - py) / h));
+        for (let j = j0; j <= j1; j++) { const y = oy + j * h + py; for (let ii = i0; ii <= i1; ii++) {
+          const x = ox + ii * h + px, u = ((x - ax) * (cy - ay) - (cx - ax) * (y - ay)) / d, v = ((bx - ax) * (y - ay) - (x - ax) * (by - ay)) / d;
+          if (u < 0 || v < 0 || u + v > 1) continue; const c = ii + mx * j;
+          if (pass === 0) cnt[c + 1]++; else zs[cnt[c]++] = az + u * (bz - az) + v * (cz - az);
+        } }
+      }
+      if (pass === 0) { for (let c = 0; c < mx * my; c++) cnt[c + 1] += cnt[c]; zs = new Float64Array(cnt[mx * my]); }
+    }
+    const inside = new Uint8Array(NN);
+    for (let c = 0; c < mx * my; c++) {
+      const e = cnt[c], b = c ? cnt[c - 1] : 0; if (e - b < 2) continue;
+      for (let a = b + 1; a < e; a++) { const v = zs[a]; let k = a - 1; while (k >= b && zs[k] > v) { zs[k + 1] = zs[k]; k--; } zs[k + 1] = v; }
+      for (let m = b; m + 1 < e; m += 2) { const k0 = Math.max(0, Math.ceil((zs[m] - oz) / h)), k1 = Math.min(nz, Math.floor((zs[m + 1] - oz) / h)); for (let k = k0; k <= k1; k++) inside[c + mx * my * k] = 1; }
+    }
+    /* 2. distance à la surface et point le plus proche, pour les sommets voisins de la surface */
+    const dist = new Float32Array(NN).fill(Infinity), cpn = new Float32Array(NN * 3), tol = 1.8 * h, t2 = tol * tol;
+    for (let t = 0; t < ntS; t++) {
+      const i = t * 9;
+      const i0 = Math.max(0, Math.ceil((Math.min(tris[i], tris[i + 3], tris[i + 6]) - tol - ox) / h)), i1 = Math.min(nx, Math.floor((Math.max(tris[i], tris[i + 3], tris[i + 6]) + tol - ox) / h));
+      const j0 = Math.max(0, Math.ceil((Math.min(tris[i + 1], tris[i + 4], tris[i + 7]) - tol - oy) / h)), j1 = Math.min(ny, Math.floor((Math.max(tris[i + 1], tris[i + 4], tris[i + 7]) + tol - oy) / h));
+      const k0 = Math.max(0, Math.ceil((Math.min(tris[i + 2], tris[i + 5], tris[i + 8]) - tol - oz) / h)), k1 = Math.min(nz, Math.floor((Math.max(tris[i + 2], tris[i + 5], tris[i + 8]) + tol - oz) / h));
+      for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
+        const g = ii + mx * (j + my * k), dd = d2(ox + ii * h, oy + j * h, oz + k * h, tris, i); if (dd > t2) continue;
+        const ds = Math.sqrt(dd); if (ds >= dist[g]) continue; dist[g] = ds; cpn[g * 3] = CP[0]; cpn[g * 3 + 1] = CP[1]; cpn[g * 3 + 2] = CP[2];
+      }
+    }
+    /* triangles rangés par case de la grille, pour projeter un point quelconque sur la surface */
+    const bcnt = new Int32Array(nx * ny * nz + 1); let blist = null;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let t = 0; t < ntS; t++) {
+        const i = t * 9, e = 0.05 * h;
+        const i0 = Math.max(0, Math.floor((Math.min(tris[i], tris[i + 3], tris[i + 6]) - e - ox) / h)), i1 = Math.min(nx - 1, Math.floor((Math.max(tris[i], tris[i + 3], tris[i + 6]) + e - ox) / h));
+        const j0 = Math.max(0, Math.floor((Math.min(tris[i + 1], tris[i + 4], tris[i + 7]) - e - oy) / h)), j1 = Math.min(ny - 1, Math.floor((Math.max(tris[i + 1], tris[i + 4], tris[i + 7]) + e - oy) / h));
+        const k0 = Math.max(0, Math.floor((Math.min(tris[i + 2], tris[i + 5], tris[i + 8]) - e - oz) / h)), k1 = Math.min(nz - 1, Math.floor((Math.max(tris[i + 2], tris[i + 5], tris[i + 8]) + e - oz) / h));
+        for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) { const c = ii + nx * (j + ny * k); if (pass === 0) bcnt[c + 1]++; else blist[bcnt[c]++] = t; }
+      }
+      if (pass === 0) { for (let c = 0; c < nx * ny * nz; c++) bcnt[c + 1] += bcnt[c]; blist = new Int32Array(bcnt[nx * ny * nz]); }
+    }
+    const NEAR = { d: 0, t: -1 };
+    function nearest(x, y, z, rad) { /* résultat : CP = point le plus proche, NEAR.t = triangle, NEAR.d = distance */
+      const ci = Math.min(nx - 1, Math.max(0, Math.floor((x - ox) / h))), cj = Math.min(ny - 1, Math.max(0, Math.floor((y - oy) / h))), ck = Math.min(nz - 1, Math.max(0, Math.floor((z - oz) / h)));
+      let best = Infinity, bt = -1, bx = 0, by = 0, bz = 0;
+      for (let k = Math.max(0, ck - rad); k <= Math.min(nz - 1, ck + rad); k++) for (let j = Math.max(0, cj - rad); j <= Math.min(ny - 1, cj + rad); j++) for (let i = Math.max(0, ci - rad); i <= Math.min(nx - 1, ci + rad); i++) {
+        const c = i + nx * (j + ny * k);
+        for (let q = c ? bcnt[c - 1] : 0, e = bcnt[c]; q < e; q++) { const t = blist[q], dd = d2(x, y, z, tris, t * 9); if (dd < best) { best = dd; bt = t; bx = CP[0]; by = CP[1]; bz = CP[2]; } }
+      }
+      NEAR.d = Math.sqrt(best); NEAR.t = bt; CP[0] = bx; CP[1] = by; CP[2] = bz; return bt;
+    }
+    /* 3. état des sommets : -1 dedans, +1 dehors, 0 ramené sur la surface (à moins de 0,25 h) */
+    const st = new Int8Array(NN), SNAP = 0.25 * h;
+    for (let g = 0; g < NN; g++) st[g] = dist[g] < SNAP ? 0 : inside[g] ? -1 : 1;
+    /* 4. tétraèdres */
+    const vid = new Int32Array(NN).fill(-1), V = [], T = [], SV = [], cutMap = new Map(); let nv = 0, dropped = 0;
+    const lat = (g, out) => { const i = g % mx, j = ((g / mx) | 0) % my, k = (g / (mx * my)) | 0; out[0] = ox + i * h; out[1] = oy + j * h; out[2] = oz + k * h; };
+    const pa = [0, 0, 0], pb = [0, 0, 0];
+    const getV = g => { if (vid[g] < 0) { vid[g] = nv++; SV.push(st[g] === 0 ? 1 : 0); if (st[g] === 0) V.push(cpn[g * 3], cpn[g * 3 + 1], cpn[g * 3 + 2]); else { lat(g, pa); V.push(pa[0], pa[1], pa[2]); } } return vid[g]; };
+    const cutV = (gi_, go) => { /* point de coupe sur l'arête dedans → dehors, projeté sur la surface */
+      const key = gi_ < go ? gi_ * NN + go : go * NN + gi_; let id = cutMap.get(key); if (id !== undefined) return id;
+      lat(gi_, pa); lat(go, pb); const da = dist[gi_], db = dist[go], t = isFinite(da) && isFinite(db) ? da / (da + db) : 0.5;
+      let x = pa[0] + t * (pb[0] - pa[0]), y = pa[1] + t * (pb[1] - pa[1]), z = pa[2] + t * (pb[2] - pa[2]);
+      if (nearest(x, y, z, 1) >= 0 && NEAR.d < 0.5 * h) { x = CP[0]; y = CP[1]; z = CP[2]; }
+      id = nv++; SV.push(1); V.push(x, y, z); cutMap.set(key, id); return id;
+    };
+    const vmin = 1e-5 * h * h * h;
+    const emit = (a, b, c, d) => {
+      if (a === b || a === c || a === d || b === c || b === d || c === d) return;
+      const ax = V[a * 3], ay = V[a * 3 + 1], az = V[a * 3 + 2], ux = V[b * 3] - ax, uy = V[b * 3 + 1] - ay, uz = V[b * 3 + 2] - az, vx = V[c * 3] - ax, vy = V[c * 3 + 1] - ay, vz = V[c * 3 + 2] - az, wx = V[d * 3] - ax, wy = V[d * 3 + 1] - ay, wz = V[d * 3 + 2] - az;
+      const vol = (ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx)) / 6;
+      if (Math.abs(vol) < vmin) { dropped++; return; }
+      if (vol > 0) T.push(a, b, c, d); else T.push(a, b, d, c);
+    };
+    const PR = [[0, 1, 2, 3, 4, 5], [1, 2, 0, 4, 5, 3], [2, 0, 1, 5, 3, 4], [3, 5, 4, 0, 2, 1], [4, 3, 5, 1, 0, 2], [5, 4, 3, 2, 1, 0]], pv = [0, 0, 0, 0, 0, 0];
+    const prism = (a, b, c, d, e, f) => { /* base (a,b,c), dessus (d,e,f), arêtes a-d, b-e, c-f ; diagonales choisies par le plus petit numéro */
+      pv[0] = a; pv[1] = b; pv[2] = c; pv[3] = d; pv[4] = e; pv[5] = f; let m = 0; for (let i = 1; i < 6; i++) if (pv[i] < pv[m]) m = i;
+      let r = PR[0]; for (const q of PR) if (q[0] === m) { r = q; break; }
+      const v1 = pv[r[0]], v2 = pv[r[1]], v3 = pv[r[2]], v4 = pv[r[3]], v5 = pv[r[4]], v6 = pv[r[5]];
+      if (Math.min(v2, v6) < Math.min(v3, v5)) { emit(v1, v2, v3, v6); emit(v1, v2, v6, v5); emit(v1, v5, v6, v4); }
+      else { emit(v1, v2, v3, v5); emit(v1, v5, v3, v6); emit(v1, v5, v6, v4); }
+    };
+    const PERM = [[1, 2], [1, 4], [2, 1], [2, 4], [4, 1], [4, 2]], gq = [0, 0, 0, 0], ins = [0, 0, 0, 0], outs = [0, 0, 0, 0];
+    /* distance signée approchée d'un point à la surface (positive dehors) ; null si aucun triangle proche */
+    const sdf = (x, y, z) => {
+      const t = nearest(x, y, z, 1); if (t < 0) return null;
+      const i9 = t * 9, ux = tris[i9 + 3] - tris[i9], uy = tris[i9 + 4] - tris[i9 + 1], uz = tris[i9 + 5] - tris[i9 + 2], vx = tris[i9 + 6] - tris[i9], vy = tris[i9 + 7] - tris[i9 + 1], vz = tris[i9 + 8] - tris[i9 + 2];
+      return (x - CP[0]) * (uy * vz - uz * vy) + (y - CP[1]) * (uz * vx - ux * vz) + (z - CP[2]) * (ux * vy - uy * vx) > 0 ? NEAR.d : -NEAR.d;
+    };
+    /* arête partant d'un sommet posé sur la surface vers un sommet dehors : si elle longe ou traverse la matière
+       (son milieu n'est pas dehors), on cherche par dichotomie l'endroit où elle en sort ; sinon la coupe est le sommet lui-même */
+    const onMap = new Map();
+    const onCut = (gx, go) => {
+      const key = gx * NN + go; let id = onMap.get(key); if (id !== undefined) return id < 0 ? getV(gx) : id;
+      lat(go, pb); const x0 = cpn[gx * 3], y0 = cpn[gx * 3 + 1], z0 = cpn[gx * 3 + 2], dx = pb[0] - x0, dy = pb[1] - y0, dz = pb[2] - z0;
+      /* l'arête reste-t-elle sur la surface (ou dans la matière) au-delà du sommet ? */
+      const L = Math.hypot(dx, dy, dz), eps = 2e-3 * h, at = t => sdf(x0 + t * dx, y0 + t * dy, z0 + t * dz);
+      const s1 = at(0.25); if (s1 === null || s1 > eps) { onMap.set(key, -1); return getV(gx); }
+      let lo = 0.25, hi = 1; for (let it = 0; it < 9; it++) { const t = (lo + hi) / 2, sv = at(t); if (sv !== null && sv <= eps) lo = t; else hi = t; }
+      /* sortie franche (arête vive) ou départ tangent (surface lisse) ? dans le second cas, la coupe reste le sommet */
+      const dl = 0.12, s2 = at(Math.min(1, lo + dl)); if (s2 === null || s2 < 0.3 * Math.min(dl, 1 - lo) * L) { onMap.set(key, -1); return getV(gx); }
+      let x = x0 + lo * dx, y = y0 + lo * dy, z = z0 + lo * dz; if (nearest(x, y, z, 1) >= 0 && NEAR.d < 0.3 * h) { x = CP[0]; y = CP[1]; z = CP[2]; }
+      id = nv++; SV.push(1); V.push(x, y, z); onMap.set(key, id); return id;
+    };
+    const cp = (gx, go) => st[gx] === 0 ? (USE_ONCUT ? onCut(gx, go) : getV(gx)) : cutV(gx, go);
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const g0 = i + mx * (j + my * k), cg = l => g0 + (l & 1) + mx * (((l >> 1) & 1) + my * ((l >> 2) & 1));
+      let any = false; for (let l = 0; l < 8; l++) if (st[cg(l)] <= 0) { any = true; break; } if (!any) continue;
+      for (const [a, b] of PERM) {
+        gq[0] = g0; gq[1] = cg(a); gq[2] = cg(a | b); gq[3] = cg(7);
+        let ni = 0, no = 0, neg = 0; for (let q = 0; q < 4; q++) { const s = st[gq[q]]; if (s > 0) outs[no++] = gq[q]; else { ins[ni++] = gq[q]; if (s < 0) neg++; } }
+        if (!ni) continue;
+        if (!neg && !no) {
+          /* 4 sommets posés sur la surface : on ne garde le tétraèdre que si son centre est dans la matière */
+          let cx = 0, cy = 0, cz = 0; for (let q = 0; q < 4; q++) { const g = gq[q]; cx += cpn[g * 3] / 4; cy += cpn[g * 3 + 1] / 4; cz += cpn[g * 3 + 2] / 4; }
+          const sv = sdf(cx, cy, cz); if (sv === null || sv >= 0) continue;
+        }
+        if (no === 0) emit(getV(gq[0]), getV(gq[1]), getV(gq[2]), getV(gq[3]));
+        else if (no === 1) prism(getV(ins[0]), getV(ins[1]), getV(ins[2]), cp(ins[0], outs[0]), cp(ins[1], outs[0]), cp(ins[2], outs[0]));
+        else if (no === 2) prism(getV(ins[0]), cp(ins[0], outs[0]), cp(ins[0], outs[1]), getV(ins[1]), cp(ins[1], outs[0]), cp(ins[1], outs[1]));
+        else emit(getV(ins[0]), cp(ins[0], outs[0]), cp(ins[0], outs[1]), cp(ins[0], outs[2]));
+      }
+    }
+    if (!T.length) return null;
+    /* 4b. arêtes vives : les sommets de surface proches d'une arête vive (ou d'un coin) du modèle y sont ramenés,
+       à condition qu'aucun tétraèdre voisin ne s'aplatisse */
+    let nFeat = 0;
+    if (topo) {
+      const adj = topo.adj, Nn = topo.normals, cs = Math.cos(30 * Math.PI / 180), seg = [];
+      for (let t = 0; t < ntS; t++) for (let e2 = 0; e2 < 3; e2++) {
+        const o2 = adj[t * 3 + e2]; if (o2 >= 0 && (o2 < t || Nn[t * 3] * Nn[o2 * 3] + Nn[t * 3 + 1] * Nn[o2 * 3 + 1] + Nn[t * 3 + 2] * Nn[o2 * 3 + 2] > cs)) continue;
+        const a = t * 9 + e2 * 3, b = t * 9 + ((e2 + 1) % 3) * 3; seg.push(tris[a], tris[a + 1], tris[a + 2], tris[b], tris[b + 1], tris[b + 2]);
+      }
+      const ns = seg.length / 6;
+      if (ns) {
+        /* coins : extrémités où se rejoignent autre chose que 2 arêtes vives, ou 2 arêtes formant un angle marqué */
+        const ends = new Map(), inv = 1 / (1e-4 * h), corners = [];
+        for (let q = 0; q < ns; q++) for (let w = 0; w < 2; w++) {
+          const x = seg[q * 6 + w * 3], y = seg[q * 6 + w * 3 + 1], z = seg[q * 6 + w * 3 + 2], key = Math.round(x * inv) + ',' + Math.round(y * inv) + ',' + Math.round(z * inv);
+          let l = Math.hypot(seg[q * 6 + 3] - seg[q * 6], seg[q * 6 + 4] - seg[q * 6 + 1], seg[q * 6 + 5] - seg[q * 6 + 2]) || 1; const sgn = w ? -1 : 1;
+          const dir = [(seg[q * 6 + 3] - seg[q * 6]) / l * sgn, (seg[q * 6 + 4] - seg[q * 6 + 1]) / l * sgn, (seg[q * 6 + 5] - seg[q * 6 + 2]) / l * sgn];
+          let en = ends.get(key); if (!en) { en = { p: [x, y, z], d: [] }; ends.set(key, en); } en.d.push(dir);
+        }
+        for (const en of ends.values()) { if (en.d.length !== 2) corners.push(en.p); else { const a = en.d[0], b = en.d[1]; if (-(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) < cs) corners.push(en.p); } }
+        /* incidence sommet -> tétraèdres */
+        const icnt = new Int32Array(nv + 1); for (let q = 0; q < T.length; q++) icnt[T[q] + 1]++; for (let v = 0; v < nv; v++) icnt[v + 1] += icnt[v];
+        const inc = new Int32Array(T.length), ipos = icnt.slice(0, nv); for (let q = 0; q < T.length; q++) inc[ipos[T[q]]++] = q >> 2;
+        const volOf = t => { const a = T[t * 4] * 3, b = T[t * 4 + 1] * 3, c = T[t * 4 + 2] * 3, d = T[t * 4 + 3] * 3, ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2], vx = V[c] - V[a], vy = V[c + 1] - V[a + 1], vz = V[c + 2] - V[a + 2], wx = V[d] - V[a], wy = V[d + 1] - V[a + 1], wz = V[d + 2] - V[a + 2]; return (ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx)) / 6; };
+        const vlim = 0.03 * h * h * h / 6, moved = new Array(nv).fill(0), olds = [];
+        const tryMove = (v, x, y, z) => {
+          olds.length = 0; for (let q = icnt[v]; q < icnt[v + 1]; q++) olds.push(volOf(inc[q]));
+          const ox_ = V[v * 3], oy_ = V[v * 3 + 1], oz_ = V[v * 3 + 2]; V[v * 3] = x; V[v * 3 + 1] = y; V[v * 3 + 2] = z;
+          for (let q = icnt[v], k = 0; q < icnt[v + 1]; q++, k++) { const nvl = volOf(inc[q]); if (nvl < vlim && nvl < 0.7 * olds[k]) { V[v * 3] = ox_; V[v * 3 + 1] = oy_; V[v * 3 + 2] = oz_; return false; } }
+          moved[v] = 1; nFeat++; return true;
+        };
+        /* coins d'abord : sommet de surface le plus proche */
+        const cellOf = (x, y, z) => Math.min(nx - 1, Math.max(0, Math.floor((x - ox) / h))) + nx * (Math.min(ny - 1, Math.max(0, Math.floor((y - oy) / h))) + ny * Math.min(nz - 1, Math.max(0, Math.floor((z - oz) / h))));
+        const vb = new Map(); for (let v = 0; v < nv; v++) if (SV[v]) { const c = cellOf(V[v * 3], V[v * 3 + 1], V[v * 3 + 2]); let a = vb.get(c); if (!a) vb.set(c, a = []); a.push(v); }
+        for (const p of corners) {
+          const ci = Math.min(nx - 1, Math.max(0, Math.floor((p[0] - ox) / h))), cj = Math.min(ny - 1, Math.max(0, Math.floor((p[1] - oy) / h))), ck = Math.min(nz - 1, Math.max(0, Math.floor((p[2] - oz) / h))); const cand = [];
+          for (let k = Math.max(0, ck - 1); k <= Math.min(nz - 1, ck + 1); k++) for (let j = Math.max(0, cj - 1); j <= Math.min(ny - 1, cj + 1); j++) for (let i = Math.max(0, ci - 1); i <= Math.min(nx - 1, ci + 1); i++) { const a = vb.get(i + nx * (j + ny * k)); if (a) for (const v of a) if (!moved[v]) { const dd = (V[v * 3] - p[0]) ** 2 + (V[v * 3 + 1] - p[1]) ** 2 + (V[v * 3 + 2] - p[2]) ** 2; if (dd < 0.64 * h * h) cand.push([dd, v]); } }
+          cand.sort((a, b) => a[0] - b[0]); for (const c of cand) if (tryMove(c[1], p[0], p[1], p[2])) break;
+        }
+        /* puis les arêtes : segments rangés par case */
+        const sc = new Int32Array(nx * ny * nz + 1); let sl = null;
+        for (let pass = 0; pass < 2; pass++) {
+          for (let q = 0; q < ns; q++) {
+            const e3 = 1.25 * h, i0 = Math.max(0, Math.floor((Math.min(seg[q * 6], seg[q * 6 + 3]) - e3 - ox) / h)), i1 = Math.min(nx - 1, Math.floor((Math.max(seg[q * 6], seg[q * 6 + 3]) + e3 - ox) / h)), j0 = Math.max(0, Math.floor((Math.min(seg[q * 6 + 1], seg[q * 6 + 4]) - e3 - oy) / h)), j1 = Math.min(ny - 1, Math.floor((Math.max(seg[q * 6 + 1], seg[q * 6 + 4]) + e3 - oy) / h)), k0 = Math.max(0, Math.floor((Math.min(seg[q * 6 + 2], seg[q * 6 + 5]) - e3 - oz) / h)), k1 = Math.min(nz - 1, Math.floor((Math.max(seg[q * 6 + 2], seg[q * 6 + 5]) + e3 - oz) / h));
+            for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const c = i + nx * (j + ny * k); if (pass === 0) sc[c + 1]++; else sl[sc[c]++] = q; }
+          }
+          if (pass === 0) { for (let c = 0; c < nx * ny * nz; c++) sc[c + 1] += sc[c]; sl = new Int32Array(sc[nx * ny * nz]); }
+        }
+        const lim2 = (0.5 * h) ** 2, cands = [];
+        for (let v = 0; v < nv; v++) {
+          if (!SV[v] || moved[v]) continue; const x = V[v * 3], y = V[v * 3 + 1], z = V[v * 3 + 2], c = cellOf(x, y, z); let best = lim2, bx = 0, by = 0, bz = 0, ok = false;
+          for (let q = c ? sc[c - 1] : 0; q < sc[c]; q++) {
+            const g = sl[q] * 6, dx = seg[g + 3] - seg[g], dy = seg[g + 4] - seg[g + 1], dz = seg[g + 5] - seg[g + 2], l2 = dx * dx + dy * dy + dz * dz || 1, t = Math.min(1, Math.max(0, ((x - seg[g]) * dx + (y - seg[g + 1]) * dy + (z - seg[g + 2]) * dz) / l2));
+            const qx = seg[g] + t * dx, qy = seg[g + 1] + t * dy, qz = seg[g + 2] + t * dz, dd = (x - qx) ** 2 + (y - qy) ** 2 + (z - qz) ** 2; if (dd < best) { best = dd; bx = qx; by = qy; bz = qz; ok = true; }
+          }
+          if (ok && best > 1e-18) cands.push([best, v, bx, by, bz]);
+        }
+        /* du plus proche au plus éloigné : les déplacements qui aplatiraient un tétraèdre sont refusés */
+        cands.sort((p, q) => p[0] - q[0]); for (const c of cands) tryMove(c[1], c[2], c[3], c[4]);
+        /* arêtes de bord qui coupent encore une arête vive (un bout sur chaque face) : on les scinde en deux
+           en plaçant le nouveau sommet sur l'arête vive ; tous les tétraèdres autour de l'arête sont scindés */
+        const segNear = (x, y, z, out) => {
+          const c = cellOf(x, y, z); let best = (1.2 * h) ** 2, ok = false;
+          for (let q = c ? sc[c - 1] : 0; q < sc[c]; q++) {
+            const g = sl[q] * 6, dx = seg[g + 3] - seg[g], dy = seg[g + 4] - seg[g + 1], dz = seg[g + 5] - seg[g + 2], l2 = dx * dx + dy * dy + dz * dz || 1, t = Math.min(1, Math.max(0, ((x - seg[g]) * dx + (y - seg[g + 1]) * dy + (z - seg[g + 2]) * dz) / l2));
+            const qx = seg[g] + t * dx, qy = seg[g + 1] + t * dy, qz = seg[g + 2] + t * dz, dd = (x - qx) ** 2 + (y - qy) ** 2 + (z - qz) ** 2; if (dd < best) { best = dd; out[0] = qx; out[1] = qy; out[2] = qz; ok = true; }
+          }
+          return ok;
+        };
+        const vnrm = new Map(), nrmOf = v => { let t = vnrm.get(v); if (t === undefined) { t = nearest(V[v * 3], V[v * 3 + 1], V[v * 3 + 2], 1); vnrm.set(v, t); } return t; };
+        const FVs = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]], np3 = [0, 0, 0];
+        for (let pass = 0; pass < 12; pass++) {
+          const ntc = T.length / 4;
+          /* faces de bord */
+          let sz = 1; while (sz < ntc * 8) sz <<= 1; const mk = sz - 1, tb = new Int32Array(sz).fill(-1), mt = new Uint8Array(ntc * 4), k3 = new Int32Array(ntc * 12);
+          for (let f = 0; f < ntc * 4; f++) {
+            const t = f >> 2, l = FVs[f & 3]; let a = T[t * 4 + l[0]], b = T[t * 4 + l[1]], c = T[t * 4 + l[2]], w;
+            if (a > b) { w = a; a = b; b = w; } if (b > c) { w = b; b = c; c = w; } if (a > b) { w = a; a = b; b = w; }
+            k3[f * 3] = a; k3[f * 3 + 1] = b; k3[f * 3 + 2] = c; let p = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663) ^ Math.imul(c, 83492791)) & mk;
+            for (; ;) { const q = tb[p]; if (q < 0) { tb[p] = f; break; } if (k3[q * 3] === a && k3[q * 3 + 1] === b && k3[q * 3 + 2] === c && !mt[q]) { mt[q] = 1; mt[f] = 1; break; } p = (p + 1) & mk; }
+          }
+          /* incidence sommet -> tétraèdres */
+          const nvc = V.length / 3, ic = new Int32Array(nvc + 1); for (let q = 0; q < T.length; q++) ic[T[q] + 1]++; for (let v = 0; v < nvc; v++) ic[v + 1] += ic[v];
+          const il = new Int32Array(T.length), ip = ic.slice(0, nvc); for (let q = 0; q < T.length; q++) il[ip[T[q]]++] = q >> 2;
+          const busy = new Uint8Array(ntc), done = new Set(); let nsplit = 0;
+          for (let f = 0; f < ntc * 4; f++) {
+            if (mt[f]) continue;
+            for (let e2 = 0; e2 < 3; e2++) {
+              let a = k3[f * 3 + e2], b = k3[f * 3 + (e2 + 1) % 3]; if (a > b) { const w = a; a = b; b = w; }
+              if (moved[a] || moved[b]) { DBG.wild = (DBG.wild || 0) + 1; continue; } const key = a * nvc + b; if (done.has(key)) continue; done.add(key);
+              const ta = nrmOf(a), tb2 = nrmOf(b); if (ta < 0 || tb2 < 0 || Nn[ta * 3] * Nn[tb2 * 3] + Nn[ta * 3 + 1] * Nn[tb2 * 3 + 1] + Nn[ta * 3 + 2] * Nn[tb2 * 3 + 2] > cs) continue;
+              const mx_ = (V[a * 3] + V[b * 3]) / 2, my_ = (V[a * 3 + 1] + V[b * 3 + 1]) / 2, mz_ = (V[a * 3 + 2] + V[b * 3 + 2]) / 2;
+              DBG.strad = (DBG.strad || 0) + 1; if (!segNear(mx_, my_, mz_, np3)) { DBG.noseg = (DBG.noseg || 0) + 1; continue; }
+              /* tétraèdres autour de l'arête */
+              const around = []; let free = true;
+              /* un tétraèdre déjà scindé dans cette passe autour de a ou de b : on attend la passe suivante */
+              for (let q = ic[a]; q < ic[a + 1] && free; q++) { const t = il[q]; if (busy[t]) free = false; else if (T[t * 4] === b || T[t * 4 + 1] === b || T[t * 4 + 2] === b || T[t * 4 + 3] === b) around.push(t); }
+              for (let q = ic[b]; q < ic[b + 1] && free; q++) if (busy[il[q]]) free = false;
+              if (!free) { done.delete(key); continue; }
+              if (!free || !around.length) continue;
+              /* validité : chaque moitié doit garder un volume positif */
+              const m = V.length / 3; V.push(np3[0], np3[1], np3[2]); T.push(0, 0, 0, 0); const tmp = T.length / 4 - 1; let ok = true;
+              for (const t of around) {
+                for (let w = 0; w < 2 && ok; w++) { for (let q = 0; q < 4; q++) { const v = T[t * 4 + q]; T[tmp * 4 + q] = v === (w ? a : b) ? m : v; } if (!(volOf(tmp) > 1e-4 * h * h * h)) ok = false; }
+                if (!ok) break;
+              }
+              T.length -= 4;
+              if (!ok) { V.length -= 3; DBG.invalid = (DBG.invalid || 0) + 1; continue; }
+              SV.push(1); moved.push(1); nv++;
+              for (const t of around) { busy[t] = 1; const q0 = T.length; T.push(T[t * 4], T[t * 4 + 1], T[t * 4 + 2], T[t * 4 + 3]); for (let q = 0; q < 4; q++) { if (T[t * 4 + q] === b) T[t * 4 + q] = m; if (T[q0 + q] === a) T[q0 + q] = m; } }
+              nsplit++; nFeat++;
+            }
+          }
+          if (!nsplit) break;
+        }
+      }
+    }
+    let nt = T.length / 4;
+    /* 5. faces communes (table de hachage), plus gros bloc connecté, faces de bord */
+    const FV = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
+    let size = 1; while (size < nt * 8) size <<= 1; const mask = size - 1, tab = new Int32Array(size).fill(-1), mate = new Int32Array(nt * 4).fill(-1), fk = new Int32Array(nt * 12);
+    for (let f = 0; f < nt * 4; f++) {
+      const t = f >> 2, l = FV[f & 3]; let a = T[t * 4 + l[0]], b = T[t * 4 + l[1]], c = T[t * 4 + l[2]], s;
+      if (a > b) { s = a; a = b; b = s; } if (b > c) { s = b; b = c; c = s; } if (a > b) { s = a; a = b; b = s; }
+      fk[f * 3] = a; fk[f * 3 + 1] = b; fk[f * 3 + 2] = c;
+      let p = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663) ^ Math.imul(c, 83492791)) & mask;
+      for (; ;) { const q = tab[p]; if (q < 0) { tab[p] = f; break; } if (fk[q * 3] === a && fk[q * 3 + 1] === b && fk[q * 3 + 2] === c && mate[q] < 0) { mate[q] = f; mate[f] = q; break; } p = (p + 1) & mask; }
+    }
+    const par = new Int32Array(nt); for (let t = 0; t < nt; t++) par[t] = t;
+    const find = x => { while (par[x] !== x) { par[x] = par[par[x]]; x = par[x]; } return x; };
+    for (let f = 0; f < nt * 4; f++) if (mate[f] > f) { const a = find(f >> 2), b = find(mate[f] >> 2); if (a !== b) par[a] = b; }
+    const csz = new Int32Array(nt); let root = 0; for (let t = 0; t < nt; t++) { const r = find(t); if (++csz[r] > csz[root]) root = r; }
+    /* renumérotation : sommets utilisés, puis nœuds de milieu d'arête */
+    const keep = new Uint8Array(nt), vnew = new Int32Array(nv).fill(-1); let ntk = 0, nvk = 0;
+    for (let t = 0; t < nt; t++) if (find(t) === root) { keep[t] = 1; ntk++; for (let q = 0; q < 4; q++) { const v = T[t * 4 + q]; if (vnew[v] < 0) vnew[v] = nvk++; } }
+    const tets = new Int32Array(ntk * 10); let esz = 1; while (esz < ntk * 14) esz <<= 1; const em = esz - 1, ea = new Int32Array(esz).fill(-1), eb = new Int32Array(esz), eid = new Int32Array(esz); let nn = nvk;
+    const midOf = (a, b) => { if (a > b) { const s = a; a = b; b = s; } let p = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663)) & em; for (; ;) { if (ea[p] < 0) { ea[p] = a; eb[p] = b; eid[p] = nn++; return eid[p]; } if (ea[p] === a && eb[p] === b) return eid[p]; p = (p + 1) & em; } };
+    const told = new Int32Array(ntk); let e = 0;
+    for (let t = 0; t < nt; t++) if (keep[t]) { for (let q = 0; q < 4; q++) tets[e * 10 + q] = vnew[T[t * 4 + q]]; for (let q = 0; q < 6; q++) tets[e * 10 + 4 + q] = midOf(tets[e * 10 + EDG[q][0]], tets[e * 10 + EDG[q][1]]); told[e] = t; e++; }
+    const coords = new Float64Array(nn * 3);
+    for (let v = 0; v < nv; v++) if (vnew[v] >= 0) { const q = vnew[v] * 3; coords[q] = V[v * 3]; coords[q + 1] = V[v * 3 + 1]; coords[q + 2] = V[v * 3 + 2]; }
+    for (let p = 0; p < esz; p++) if (ea[p] >= 0) { const q = eid[p] * 3, a = ea[p] * 3, b = eb[p] * 3; coords[q] = (coords[a] + coords[b]) / 2; coords[q + 1] = (coords[a + 1] + coords[b + 1]) / 2; coords[q + 2] = (coords[a + 2] + coords[b + 2]) / 2; }
+    /* géométrie des éléments : gradients des coordonnées barycentriques et volume */
+    const grads = new Float64Array(ntk * 12), vol = new Float64Array(ntk); let vtot = 0, qmin = Infinity;
+    for (let t = 0; t < ntk; t++) {
+      const a = tets[t * 10] * 3, b = tets[t * 10 + 1] * 3, c = tets[t * 10 + 2] * 3, d = tets[t * 10 + 3] * 3;
+      const ux = coords[b] - coords[a], uy = coords[b + 1] - coords[a + 1], uz = coords[b + 2] - coords[a + 2], vx = coords[c] - coords[a], vy = coords[c + 1] - coords[a + 1], vz = coords[c + 2] - coords[a + 2], wx = coords[d] - coords[a], wy = coords[d + 1] - coords[a + 1], wz = coords[d + 2] - coords[a + 2];
+      const det = ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx), id = 1 / det, g = t * 12;
+      g1: { grads[g + 3] = (vy * wz - vz * wy) * id; grads[g + 4] = (vz * wx - vx * wz) * id; grads[g + 5] = (vx * wy - vy * wx) * id; }
+      grads[g + 6] = (wy * uz - wz * uy) * id; grads[g + 7] = (wz * ux - wx * uz) * id; grads[g + 8] = (wx * uy - wy * ux) * id;
+      grads[g + 9] = (uy * vz - uz * vy) * id; grads[g + 10] = (uz * vx - ux * vz) * id; grads[g + 11] = (ux * vy - uy * vx) * id;
+      grads[g] = -grads[g + 3] - grads[g + 6] - grads[g + 9]; grads[g + 1] = -grads[g + 4] - grads[g + 7] - grads[g + 10]; grads[g + 2] = -grads[g + 5] - grads[g + 8] - grads[g + 11];
+      vol[t] = det / 6; vtot += vol[t]; const ql = det / (h * h * h); if (ql < qmin) qmin = ql;
+    }
+    /* faces de bord (6 nœuds, normale sortante) et triangle STL le plus proche de chaque face */
+    const bf = [], btri = [];
+    for (let t = 0; t < ntk; t++) for (let l = 0; l < 4; l++) {
+      if (mate[told[t] * 4 + l] >= 0) continue;
+      const a = tets[t * 10 + FV[l][0]], b = tets[t * 10 + FV[l][1]], c = tets[t * 10 + FV[l][2]];
+      bf.push(a, b, c, midOf(a, b), midOf(b, c), midOf(c, a));
+      nearest((coords[a * 3] + coords[b * 3] + coords[c * 3]) / 3, (coords[a * 3 + 1] + coords[b * 3 + 1] + coords[c * 3 + 1]) / 3, (coords[a * 3 + 2] + coords[b * 3 + 2] + coords[c * 3 + 2]) / 3, 1); btri.push(NEAR.t);
+    }
+    /* 6. bords courbes : les nœuds de milieu des arêtes de bord sont ramenés sur la vraie surface ;
+       les éléments concernés deviennent courbes (gradients stockés aux 4 points de Gauss) */
+    const mvd = new Uint8Array(nn), straight = new Float64Array(0); let nmv = 0;
+    const s0 = new Map(); /* position droite d'origine des nœuds déplacés */
+    for (let f = 0; f < btri.length; f++) for (let q = 0; q < 3; q++) {
+      const m = bf[f * 6 + 3 + q]; if (mvd[m]) continue; const a = bf[f * 6 + q], b = bf[f * 6 + (q + 1) % 3];
+      const le = Math.hypot(coords[a * 3] - coords[b * 3], coords[a * 3 + 1] - coords[b * 3 + 1], coords[a * 3 + 2] - coords[b * 3 + 2]);
+      if (nearest(coords[m * 3], coords[m * 3 + 1], coords[m * 3 + 2], 1) < 0 || !(NEAR.d > 1e-7 * h) || NEAR.d > 0.2 * le) continue;
+      s0.set(m, [coords[m * 3], coords[m * 3 + 1], coords[m * 3 + 2]]); coords[m * 3] = CP[0]; coords[m * 3 + 1] = CP[1]; coords[m * 3 + 2] = CP[2]; mvd[m] = 1; nmv++;
+    }
+    const CHK = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]].concat(GP), cidx = new Int32Array(ntk).fill(-1); let ncv = 0;
+    for (let pass = 0; pass < 3; pass++) {
+      let bad = 0;
+      for (let t = 0; t < ntk; t++) {
+        let any = false; for (let q = 4; q < 10; q++) if (mvd[tets[t * 10 + q]]) { any = true; break; } if (!any) continue;
+        for (let a = 0; a < 10; a++) { const nd = tets[t * 10 + a] * 3; XE[a * 3] = coords[nd]; XE[a * 3 + 1] = coords[nd + 1]; XE[a * 3 + 2] = coords[nd + 2]; }
+        let ok = true; for (const L of CHK) if (!(isoGrad(L[1], L[2], L[3]) > 0.15 * vol[t] * 6)) { ok = false; break; }
+        if (!ok) { bad++; for (let q = 4; q < 10; q++) { const m = tets[t * 10 + q]; if (mvd[m]) { const p = s0.get(m); coords[m * 3] = p[0]; coords[m * 3 + 1] = p[1]; coords[m * 3 + 2] = p[2]; mvd[m] = 0; nmv--; } } }
+      }
+      if (!bad) break;
+    }
+    const cg = [];
+    for (let t = 0; t < ntk; t++) {
+      let any = false; for (let q = 4; q < 10; q++) if (mvd[tets[t * 10 + q]]) { any = true; break; } if (!any) continue;
+      for (let a = 0; a < 10; a++) { const nd = tets[t * 10 + a] * 3; XE[a * 3] = coords[nd]; XE[a * 3 + 1] = coords[nd + 1]; XE[a * 3 + 2] = coords[nd + 2]; }
+      cidx[t] = ncv++; let v2 = 0;
+      for (let q = 0; q < 4; q++) { const det = isoGrad(GP[q][1], GP[q][2], GP[q][3]); for (let a = 0; a < 30; a++) cg.push(DN[a]); cg.push(det / 24); v2 += det / 24; }
+      vtot += v2 - vol[t]; vol[t] = v2;
+    }
+    const tm = { h, nt: ntk, nn, nv: nvk, tets, coords, grads, vol, vtot, cidx, cgp: Float64Array.from(cg), ncv, nFeat, bfaces: Int32Array.from(bf), nbf: btri.length, btri: Int32Array.from(btri), dropped, qmin };
+    if (hex) linkHex(tm, hex);
+    return tm;
+  }
+  /* interpolation de la grille de cellules vers les nœuds des tétraèdres (8 nœuds de grille et poids par nœud) */
+  function linkHex(tm, hex) {
+    const { nx, ny, nz, h, ox, oy, oz, elemOf, conn } = hex, pc = new Int32Array(tm.nn * 8).fill(-1), pw = new Float32Array(tm.nn * 8), X = tm.coords;
+    for (let p = 0; p < tm.nn; p++) {
+      const x = X[p * 3], y = X[p * 3 + 1], z = X[p * 3 + 2];
+      let i = Math.min(nx - 1, Math.max(0, Math.floor((x - ox) / h))), j = Math.min(ny - 1, Math.max(0, Math.floor((y - oy) / h))), k = Math.min(nz - 1, Math.max(0, Math.floor((z - oz) / h)));
+      let e = elemOf[i + nx * (j + ny * k)];
+      if (e < 0) { let best = Infinity; const i0 = i, j0 = j, k0 = k;
+        for (let c = Math.max(0, k0 - 1); c <= Math.min(nz - 1, k0 + 1); c++) for (let b = Math.max(0, j0 - 1); b <= Math.min(ny - 1, j0 + 1); b++) for (let a = Math.max(0, i0 - 1); a <= Math.min(nx - 1, i0 + 1); a++) {
+          const q = elemOf[a + nx * (b + ny * c)]; if (q < 0) continue; const dd = (ox + (a + 0.5) * h - x) ** 2 + (oy + (b + 0.5) * h - y) ** 2 + (oz + (c + 0.5) * h - z) ** 2; if (dd < best) { best = dd; e = q; i = a; j = b; k = c; }
+        } }
+      if (e < 0) continue;
+      const lx = Math.min(1, Math.max(0, (x - ox) / h - i)), ly = Math.min(1, Math.max(0, (y - oy) / h - j)), lz = Math.min(1, Math.max(0, (z - oz) / h - k));
+      for (let c = 0; c < 8; c++) { pc[p * 8 + c] = conn[e * 8 + c]; pw[p * 8 + c] = (c & 1 ? lx : 1 - lx) * (c & 2 ? ly : 1 - ly) * (c & 4 ? lz : 1 - lz); }
+    }
+    tm.pc = pc; tm.pw = pw;
+  }
+
+  /* ---------- Opérateur : y = K·x (tétraèdres quadratiques, 4 points de Gauss, sans matrice stockée) ---------- */
+  const U = new Float64Array(30), FE = new Float64Array(30), AK = new Float64Array(12), SK = new Float64Array(12);
+  function tetMatvec(tm, lam, mu, x, y, nb) {
+    const { nt, tets, grads, vol, cidx, cgp } = tm; y.fill(0);
+    for (let e = 0; e < nt; e++) {
+      const b = e * 10, g = e * 12, wq = vol[e] / 4;
+      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; U[a * 3] = x[n]; U[a * 3 + 1] = x[n + 1]; U[a * 3 + 2] = x[n + 2]; }
+      FE.fill(0);
+      const ci = cidx[e];
+      if (ci >= 0) for (let q = 0; q < 4; q++) { /* élément courbe : gradients stockés */
+        const o = ci * 124 + q * 31, w = cgp[o + 30]; let G00 = 0, G01 = 0, G02 = 0, G10 = 0, G11 = 0, G12 = 0, G20 = 0, G21 = 0, G22 = 0;
+        for (let a = 0; a < 10; a++) { const gx = cgp[o + a * 3], gy = cgp[o + a * 3 + 1], gz = cgp[o + a * 3 + 2], u0 = U[a * 3], u1 = U[a * 3 + 1], u2 = U[a * 3 + 2]; G00 += u0 * gx; G01 += u0 * gy; G02 += u0 * gz; G10 += u1 * gx; G11 += u1 * gy; G12 += u1 * gz; G20 += u2 * gx; G21 += u2 * gy; G22 += u2 * gz; }
+        const tr = lam * (G00 + G11 + G22) * w, m2 = mu * w, sxx = tr + 2 * m2 * G00, syy = tr + 2 * m2 * G11, szz = tr + 2 * m2 * G22, sxy = m2 * (G01 + G10), syz = m2 * (G12 + G21), szx = m2 * (G02 + G20);
+        for (let a = 0; a < 10; a++) { const gx = cgp[o + a * 3], gy = cgp[o + a * 3 + 1], gz = cgp[o + a * 3 + 2]; FE[a * 3] += sxx * gx + sxy * gy + szx * gz; FE[a * 3 + 1] += sxy * gx + syy * gy + syz * gz; FE[a * 3 + 2] += szx * gx + syz * gy + szz * gz; }
+      }
+      else for (let q = 0; q < 4; q++) {
+        const L = GP[q];
+        /* a_k = -u_k + 4 Σ_j L_j w_kj  (w_kk = u_k, w_kj = nœud milieu k-j) ; gradient G = Σ_k a_k ⊗ g_k */
+        let G00 = 0, G01 = 0, G02 = 0, G10 = 0, G11 = 0, G12 = 0, G20 = 0, G21 = 0, G22 = 0;
+        for (let k = 0; k < 4; k++) {
+          const M = MID[k]; let a0 = (4 * L[k] - 1) * U[k * 3], a1 = (4 * L[k] - 1) * U[k * 3 + 1], a2 = (4 * L[k] - 1) * U[k * 3 + 2];
+          for (let j = 0; j < 4; j++) { if (j === k) continue; const m = M[j] * 3, c = 4 * L[j]; a0 += c * U[m]; a1 += c * U[m + 1]; a2 += c * U[m + 2]; }
+          const gx = grads[g + k * 3], gy = grads[g + k * 3 + 1], gz = grads[g + k * 3 + 2];
+          G00 += a0 * gx; G01 += a0 * gy; G02 += a0 * gz; G10 += a1 * gx; G11 += a1 * gy; G12 += a1 * gz; G20 += a2 * gx; G21 += a2 * gy; G22 += a2 * gz;
+        }
+        const tr = lam * (G00 + G11 + G22) * wq, m2 = mu * wq, sxx = tr + 2 * m2 * G00, syy = tr + 2 * m2 * G11, szz = tr + 2 * m2 * G22, sxy = m2 * (G01 + G10), syz = m2 * (G12 + G21), szx = m2 * (G02 + G20);
+        for (let k = 0; k < 4; k++) { const gx = grads[g + k * 3], gy = grads[g + k * 3 + 1], gz = grads[g + k * 3 + 2]; SK[k * 3] = sxx * gx + sxy * gy + szx * gz; SK[k * 3 + 1] = sxy * gx + syy * gy + syz * gz; SK[k * 3 + 2] = szx * gx + syz * gy + szz * gz; }
+        for (let k = 0; k < 4; k++) {
+          const c = 4 * L[k] - 1; FE[k * 3] += c * SK[k * 3]; FE[k * 3 + 1] += c * SK[k * 3 + 1]; FE[k * 3 + 2] += c * SK[k * 3 + 2];
+          for (let j = k + 1; j < 4; j++) { const m = MID[k][j] * 3, ck = 4 * L[k], cj = 4 * L[j]; FE[m] += ck * SK[j * 3] + cj * SK[k * 3]; FE[m + 1] += ck * SK[j * 3 + 1] + cj * SK[k * 3 + 1]; FE[m + 2] += ck * SK[j * 3 + 2] + cj * SK[k * 3 + 2]; }
+        }
+      }
+      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; y[n] += FE[a * 3]; y[n + 1] += FE[a * 3 + 1]; y[n + 2] += FE[a * 3 + 2]; }
+    }
+    if (nb) for (let n = 0, nn = tm.nn; n < nn; n++) {
+      const q = n * 6; if (nb[q] === 0 && nb[q + 1] === 0 && nb[q + 2] === 0) continue;
+      const x0 = x[n * 3], x1 = x[n * 3 + 1], x2 = x[n * 3 + 2];
+      y[n * 3] += nb[q] * x0 + nb[q + 3] * x1 + nb[q + 5] * x2; y[n * 3 + 1] += nb[q + 3] * x0 + nb[q + 1] * x1 + nb[q + 4] * x2; y[n * 3 + 2] += nb[q + 5] * x0 + nb[q + 4] * x1 + nb[q + 2] * x2;
+    }
+  }
+  function tetDiag(tm, lam, mu, D, nb) {
+    const { nt, tets, grads, vol } = tm, dN = new Float64Array(30);
+    for (let e = 0; e < nt; e++) {
+      const b = e * 10, g = e * 12, ci = tm.cidx[e]; let wq = vol[e] / 4;
+      for (let q = 0; q < 4; q++) {
+        const L = GP[q];
+        if (ci >= 0) { const o = ci * 124 + q * 31; for (let a = 0; a < 30; a++) dN[a] = tm.cgp[o + a]; wq = tm.cgp[o + 30]; }
+        else for (let k = 0; k < 4; k++) { const c = 4 * L[k] - 1; dN[k * 3] = c * grads[g + k * 3]; dN[k * 3 + 1] = c * grads[g + k * 3 + 1]; dN[k * 3 + 2] = c * grads[g + k * 3 + 2];
+          for (let j = k + 1; j < 4; j++) { const m = MID[k][j] * 3; for (let c2 = 0; c2 < 3; c2++) dN[m + c2] = 4 * (L[k] * grads[g + j * 3 + c2] + L[j] * grads[g + k * 3 + c2]); } }
+        for (let a = 0; a < 10; a++) { const s = dN[a * 3] ** 2 + dN[a * 3 + 1] ** 2 + dN[a * 3 + 2] ** 2, n = tets[b + a] * 3; for (let c = 0; c < 3; c++) D[n + c] += wq * ((lam + mu) * dN[a * 3 + c] ** 2 + mu * s); }
+      }
+    }
+    if (nb) for (let n = 0; n < tm.nn; n++) for (let c = 0; c < 3; c++) D[n * 3 + c] += nb[n * 6 + c];
+  }
+
+  /* ---------- Gradient conjugué ; préconditionneur : lissage de Tchebychev sur les tétraèdres
+     + correction calculée sur la grille de cellules coupées (un cycle de multigrille) ---------- */
+  async function tetPcg(o) {
+    const { tm, hex, lam, mu, fixed, x, f, nb } = o, tol = o.tol || 1e-6, maxIter = o.maxIter || 5000, n = tm.nn * 3;
+    const r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), q = new Float64Array(n), iD = new Float64Array(n), d = new Float64Array(n), rr_ = new Float64Array(n);
+    tetDiag(tm, lam, mu, iD, nb); for (let i = 0; i < n; i++) iD[i] = fixed[i] || !(iD[i] > 0) ? 0 : 1 / iD[i];
+    /* plus grande valeur propre de D⁻¹K (itération de puissance) */
+    let lmax = 1; { for (let i = 0; i < n; i++) p[i] = fixed[i] ? 0 : Math.sin(i * 0.731 + 1) + 0.3; for (let it = 0; it < 14; it++) { tetMatvec(tm, lam, mu, p, q, nb); let a = 0, b = 0; for (let i = 0; i < n; i++) { q[i] *= iD[i]; a += q[i] * q[i]; b += p[i] * p[i]; } lmax = Math.sqrt(a / b); const s = 1 / Math.sqrt(a); for (let i = 0; i < n; i++) p[i] = q[i] * s; } lmax *= 1.12; }
+    const mg = I.mgSetup(hex, o.Ke, o.hexScale, o.hexFixed, o.hexNb || null), nh = hex.nn * 3, cb = new Float64Array(nh), cx = new Float64Array(nh), pc = tm.pc, pw = tm.pw, hf = o.hexFixed;
+    const DEG = 2, AL = 6, lmin = lmax / AL, th = (lmax + lmin) / 2, de = (lmax - lmin) / 2, sg = th / de;
+    const cheb = (b, xx, fromZero, needRes) => {
+      let rho = 1 / sg;
+      if (fromZero) { for (let i = 0; i < n; i++) { xx[i] = 0; rr_[i] = fixed[i] ? 0 : b[i]; } } else { tetMatvec(tm, lam, mu, xx, q, nb); for (let i = 0; i < n; i++) rr_[i] = fixed[i] ? 0 : b[i] - q[i]; }
+      for (let i = 0; i < n; i++) d[i] = iD[i] * rr_[i] / th;
+      for (let k = 0; k < DEG; k++) {
+        for (let i = 0; i < n; i++) xx[i] += d[i];
+        if (k === DEG - 1 && !needRes) break;
+        tetMatvec(tm, lam, mu, d, q, nb); const rn = 1 / (2 * sg - rho), c1 = rn * rho, c2 = 2 * rn / de;
+        for (let i = 0; i < n; i++) { if (!fixed[i]) rr_[i] -= q[i]; d[i] = c1 * d[i] + c2 * iD[i] * rr_[i]; } rho = rn;
+      }
+    };
+    const prec = () => {
+      cheb(r, z, true, true); cb.fill(0);
+      for (let v = 0, nn = tm.nn; v < nn; v++) for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; cb[c * 3] += w * rr_[v * 3]; cb[c * 3 + 1] += w * rr_[v * 3 + 1]; cb[c * 3 + 2] += w * rr_[v * 3 + 2]; }
+      for (let i = 0; i < nh; i++) if (hf[i]) cb[i] = 0;
+      I.vcycle(mg, 0, cb, cx);
+      for (let v = 0, nn = tm.nn; v < nn; v++) { let a0 = 0, a1 = 0, a2 = 0; for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; a0 += w * cx[c * 3]; a1 += w * cx[c * 3 + 1]; a2 += w * cx[c * 3 + 2]; } if (!fixed[v * 3]) z[v * 3] += a0; if (!fixed[v * 3 + 1]) z[v * 3 + 1] += a1; if (!fixed[v * 3 + 2]) z[v * 3 + 2] += a2; }
+      cheb(r, z, false, false);
+    };
+    for (let i = 0; i < n; i++) p[i] = fixed[i] ? x[i] : 0;
+    tetMatvec(tm, lam, mu, p, q, nb);
+    let bn = 0; for (let i = 0; i < n; i++) if (!fixed[i]) { const b = f[i] - q[i]; bn += b * b; } bn = Math.sqrt(bn);
+    if (bn === 0) { for (let i = 0; i < n; i++) if (!fixed[i]) x[i] = 0; return { iter: 0, res: 0, converged: true }; }
+    tetMatvec(tm, lam, mu, x, q, nb);
+    let rz = 0, rr = 0; for (let i = 0; i < n; i++) { r[i] = fixed[i] ? 0 : f[i] - q[i]; rr += r[i] * r[i]; }
+    prec(); for (let i = 0; i < n; i++) { p[i] = z[i]; rz += r[i] * z[i]; }
+    let res = Math.sqrt(rr) / bn, it = 0, last = Date.now();
+    while (res > tol && it < maxIter) {
+      tetMatvec(tm, lam, mu, p, q, nb);
+      let pq = 0; for (let i = 0; i < n; i++) { if (fixed[i]) q[i] = 0; pq += p[i] * q[i]; }
+      if (!(pq > 0)) return { iter: it, res, converged: false };
+      const al = rz / pq; rr = 0; for (let i = 0; i < n; i++) { x[i] += al * p[i]; r[i] -= al * q[i]; rr += r[i] * r[i]; }
+      res = Math.sqrt(rr) / bn; it++; if (!isFinite(res)) return { iter: it, res, converged: false }; if (res <= tol) break;
+      prec(); let rz2 = 0; for (let i = 0; i < n; i++) rz2 += r[i] * z[i]; const be = rz2 / rz; rz = rz2; for (let i = 0; i < n; i++) p[i] = z[i] + be * p[i];
+      if (o.tick && Date.now() - last > 120) { last = Date.now(); if ((await o.tick(it, res)) === false) return { iter: it, res, converged: false, cancelled: true }; }
+    }
+    return { iter: it, res, converged: res <= tol };
+  }
+
+  /* ---------- Conditions aux limites sur les faces de bord ----------
+     specs : [{type, tris:[triangles STL], v, bearing, stick}] ; N = normales des triangles STL */
+  function tetBCs(tm, N, ntS, specs) {
+    const { bfaces, nbf, btri, coords } = tm, out = [], mark = new Uint8Array(ntS);
+    for (const s of specs) {
+      mark.fill(0); for (const t of s.tris) mark[t] = 1;
+      const acc = new Map(), m = Math.hypot(s.v[0], s.v[1], s.v[2]) || 1; /* nœud -> [poids, nx, ny, nz] */
+      const add = (nd, w, t) => { let a = acc.get(nd); if (!a) { a = [0, 0, 0, 0]; acc.set(nd, a); } a[0] += w; a[1] += N[t * 3]; a[2] += N[t * 3 + 1]; a[3] += N[t * 3 + 2]; };
+      for (let pass = 0; pass < 2; pass++) {
+        let W = 0;
+        for (let f = 0; f < nbf; f++) {
+          const t = btri[f]; if (t < 0 || !mark[t]) continue;
+          const a = bfaces[f * 6] * 3, b = bfaces[f * 6 + 1] * 3, c = bfaces[f * 6 + 2] * 3, ux = coords[b] - coords[a], uy = coords[b + 1] - coords[a + 1], uz = coords[b + 2] - coords[a + 2], vx = coords[c] - coords[a], vy = coords[c + 1] - coords[a + 1], vz = coords[c + 2] - coords[a + 2];
+          let A = 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+          if (s.type === 'force') { if (s.bearing && pass === 0) A *= Math.max(0, -(s.v[0] * N[t * 3] + s.v[1] * N[t * 3 + 1] + s.v[2] * N[t * 3 + 2]) / m); for (let q = 0; q < 3; q++) add(bfaces[f * 6 + q], 0, t); for (let q = 3; q < 6; q++) add(bfaces[f * 6 + q], A / 3, t); }
+          else { for (let q = 0; q < 3; q++) add(bfaces[f * 6 + q], A / 12, t); for (let q = 3; q < 6; q++) add(bfaces[f * 6 + q], A / 4, t); }
+          W += A;
+        }
+        if (W > 0 || s.type !== 'force' || !s.bearing) break; acc.clear();
+      }
+      const nodes = Int32Array.from(acc.keys()), w = new Float64Array(nodes.length), normals = new Float32Array(nodes.length * 3); let W = 0, i = 0;
+      for (const a of acc.values()) { w[i] = a[0]; W += a[0]; const l = Math.hypot(a[1], a[2], a[3]) || 1; normals[i * 3] = a[1] / l; normals[i * 3 + 1] = a[2] / l; normals[i * 3 + 2] = a[3] / l; i++; }
+      if (s.type === 'force' && W > 0) for (let k = 0; k < w.length; k++) w[k] /= W;
+      out.push({ type: s.type, nodes, w, normals, v: s.v, stick: !!s.stick });
+    }
+    return out;
+  }
+  function assemble(tm, bcs, kA) { /* kA : raideur de contact par unité d'aire */
+    const n = tm.nn * 3, fixed = new Uint8Array(n), x = new Float64Array(n), f = new Float64Array(n); let nb = null;
+    for (const b of bcs) {
+      if (b.type === 'force') { for (let i = 0; i < b.nodes.length; i++) for (let c = 0; c < 3; c++) f[b.nodes[i] * 3 + c] += b.v[c] * b.w[i]; }
+      else if (b.type === 'pin') {
+        if (!nb) nb = new Float64Array(tm.nn * 6);
+        for (let i = 0; i < b.nodes.length; i++) {
+          if (b.active && !b.active[i]) continue;
+          const q = b.nodes[i] * 6, k0 = kA * b.w[i], k = b.stick ? 0 : k0, kt = k0 * (b.stick ? 1 : 0.02), nx = b.normals[i * 3], ny = b.normals[i * 3 + 1], nz = b.normals[i * 3 + 2];
+          nb[q] += k * nx * nx + kt; nb[q + 1] += k * ny * ny + kt; nb[q + 2] += k * nz * nz + kt; nb[q + 3] += k * nx * ny; nb[q + 4] += k * ny * nz; nb[q + 5] += k * nz * nx;
+        }
+      } else for (let i = 0; i < b.nodes.length; i++) for (let c = 0; c < 3; c++) { const val = b.type === 'disp' ? b.v[c] : 0; if (val === null || val === undefined) continue; fixed[b.nodes[i] * 3 + c] = 1; x[b.nodes[i] * 3 + c] = val; }
+    }
+    return { fixed, x, f, nb };
+  }
+  /* Résolution complète avec contact des axes. o : { mesh (cellules, avec mesh.tet), Ke, E, nu, bcs (tétraèdres), hexBcs (cellules), kpen, tol, tick } */
+  async function tetSolve(o) {
+    const hex = o.mesh, tm = hex.tet, E = o.E, nu = o.nu, lam = E * nu / ((1 + nu) * (1 - 2 * nu)), mu = E / (2 * (1 + nu)), n = tm.nn * 3, tol = o.tol || 1e-6;
+    const bcs = o.bcs, pins = bcs.filter(b => b.type === 'pin'), hpins = o.hexBcs.filter(b => b.type === 'pin'), hexScale = new Float64Array(hex.ne).fill(E * hex.h), kA = 4 * E / tm.h;
+    for (const b of pins) b.active = new Uint8Array(b.nodes.length).fill(1);
+    /* nœud d'axe de la grille -> nœud d'axe des tétraèdres le plus proche (pour recopier l'état du contact) */
+    hpins.forEach((hb, pi) => { const tb = pins[pi], X = tm.coords, Y = hex.coords; hb.near = new Int32Array(hb.nodes.length); hb.active = new Uint8Array(hb.nodes.length).fill(1);
+      for (let i = 0; i < hb.nodes.length; i++) { const a = hb.nodes[i] * 3; let best = Infinity, bi = 0; for (let j = 0; j < tb.nodes.length; j++) { const c = tb.nodes[j] * 3, dd = (X[c] - Y[a]) ** 2 + (X[c + 1] - Y[a + 1]) ** 2 + (X[c + 2] - Y[a + 2]) ** 2; if (dd < best) { best = dd; bi = j; } } hb.near[i] = bi; } });
+    let u = null, bc = null, r = null, round = 0, last = !pins.length, total = 0;
+    for (; ;) {
+      round++; bc = assemble(tm, bcs, kA);
+      hpins.forEach((hb, pi) => { for (let i = 0; i < hb.nodes.length; i++) hb.active[i] = pins[pi].active[hb.near[i]]; });
+      const hb = I.buildBC(hex, o.hexBcs, o.kpen);
+      if (u) for (let i = 0; i < n; i++) if (!bc.fixed[i]) bc.x[i] = u[i];
+      r = await tetPcg({ tm, hex, lam, mu, Ke: o.Ke, hexScale, hexFixed: hb.fixed, hexNb: hb.nb, fixed: bc.fixed, x: bc.x, f: bc.f, nb: bc.nb, tol: last ? tol : Math.max(tol, 1e-3), tick: o.tick ? (it, res) => o.tick(it, res, round) : null });
+      u = bc.x; total += r.iter; if (!r.converged || last) break;
+      let umax = 0, changed = 0, np = 0;
+      for (const b of pins) for (let i = 0; i < b.nodes.length; i++) { const nd = b.nodes[i] * 3; umax = Math.max(umax, Math.abs(u[nd] * b.normals[i * 3] + u[nd + 1] * b.normals[i * 3 + 1] + u[nd + 2] * b.normals[i * 3 + 2])); }
+      for (const b of pins) {
+        let act = 0, bi = -1, bg = -Infinity; const off = []; np += b.nodes.length;
+        for (let i = 0; i < b.nodes.length; i++) {
+          const nd = b.nodes[i] * 3, g = u[nd] * b.normals[i * 3] + u[nd + 1] * b.normals[i * 3 + 1] + u[nd + 2] * b.normals[i * 3 + 2];
+          if (g > bg) { bg = g; bi = i; }
+          if (b.active[i]) { if (g < -1e-6 * umax) off.push(i); else act++; } else if (g > 1e-6 * umax && round <= 5) { b.active[i] = 1; act++; changed++; }
+        }
+        for (const i of off) { if (!act && i === bi) continue; b.active[i] = 0; changed++; }
+      }
+      if (changed <= Math.max(1, 0.01 * np) || round >= 8) last = true;
+    }
+    return { u, iter: total, converged: r.converged, cancelled: r.cancelled, rounds: round };
+  }
+
+  /* ---------- Contraintes aux nœuds (la déformation varie linéairement dans l'élément : on l'évalue aux 4 sommets) ---------- */
+  function tetResults(tm, E, nu, u) {
+    const { nt, nn, tets, grads, vol } = tm, lam = E * nu / ((1 + nu) * (1 - 2 * nu)), mu = E / (2 * (1 + nu));
+    const S = new Float64Array(nn * 6), W = new Float64Array(nn), vmN = new Float32Array(nn), dN = new Float32Array(nn), sc = new Float64Array(24);
+    for (let e = 0; e < nt; e++) {
+      const b = e * 10, g = e * 12, w = vol[e];
+      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; U[a * 3] = u[n]; U[a * 3 + 1] = u[n + 1]; U[a * 3 + 2] = u[n + 2]; }
+      const cv = tm.cidx[e] >= 0;
+      if (cv) for (let a = 0; a < 10; a++) { const nd = tets[b + a] * 3; XE[a * 3] = tm.coords[nd]; XE[a * 3 + 1] = tm.coords[nd + 1]; XE[a * 3 + 2] = tm.coords[nd + 2]; }
+      for (let i = 0; i < 4; i++) { /* au sommet i : L = e_i */
+        let G00 = 0, G01 = 0, G02 = 0, G10 = 0, G11 = 0, G12 = 0, G20 = 0, G21 = 0, G22 = 0;
+        if (cv) { isoGrad(i === 1 ? 1 : 0, i === 2 ? 1 : 0, i === 3 ? 1 : 0); for (let a = 0; a < 10; a++) { const gx = DN[a * 3], gy = DN[a * 3 + 1], gz = DN[a * 3 + 2], u0 = U[a * 3], u1 = U[a * 3 + 1], u2 = U[a * 3 + 2]; G00 += u0 * gx; G01 += u0 * gy; G02 += u0 * gz; G10 += u1 * gx; G11 += u1 * gy; G12 += u1 * gz; G20 += u2 * gx; G21 += u2 * gy; G22 += u2 * gz; } }
+        else for (let k = 0; k < 4; k++) {
+          let a0, a1, a2; if (k === i) { a0 = 3 * U[k * 3]; a1 = 3 * U[k * 3 + 1]; a2 = 3 * U[k * 3 + 2]; } else { const m = MID[k][i] * 3; a0 = 4 * U[m] - U[k * 3]; a1 = 4 * U[m + 1] - U[k * 3 + 1]; a2 = 4 * U[m + 2] - U[k * 3 + 2]; }
+          const gx = grads[g + k * 3], gy = grads[g + k * 3 + 1], gz = grads[g + k * 3 + 2];
+          G00 += a0 * gx; G01 += a0 * gy; G02 += a0 * gz; G10 += a1 * gx; G11 += a1 * gy; G12 += a1 * gz; G20 += a2 * gx; G21 += a2 * gy; G22 += a2 * gz;
+        }
+        const tr = lam * (G00 + G11 + G22); sc[i * 6] = tr + 2 * mu * G00; sc[i * 6 + 1] = tr + 2 * mu * G11; sc[i * 6 + 2] = tr + 2 * mu * G22; sc[i * 6 + 3] = mu * (G01 + G10); sc[i * 6 + 4] = mu * (G12 + G21); sc[i * 6 + 5] = mu * (G02 + G20);
+        const n = tets[b + i]; for (let c = 0; c < 6; c++) S[n * 6 + c] += w * sc[i * 6 + c]; W[n] += w;
+      }
+      for (let q = 0; q < 6; q++) { const n = tets[b + 4 + q], i = EDG[q][0], j = EDG[q][1]; for (let c = 0; c < 6; c++) S[n * 6 + c] += w * 0.5 * (sc[i * 6 + c] + sc[j * 6 + c]); W[n] += w; }
+    }
+    let maxD = 0, maxVm = 0;
+    for (let n = 0; n < nn; n++) {
+      const c = 1 / (W[n] || 1), q = n * 6, sxx = S[q] * c, syy = S[q + 1] * c, szz = S[q + 2] * c, sxy = S[q + 3] * c, syz = S[q + 4] * c, szx = S[q + 5] * c;
+      vmN[n] = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * (sxy * sxy + syz * syz + szx * szx)); if (vmN[n] > maxVm) maxVm = vmN[n];
+      dN[n] = Math.hypot(u[n * 3], u[n * 3 + 1], u[n * 3 + 2]); if (dN[n] > maxD) maxD = dN[n];
+    }
+    const s = Float32Array.from(vmN).sort(), p99 = s[Math.min(nn - 1, Math.floor(nn * 0.99))];
+    return { u, vmN, dN, maxD, maxVm, p99 };
+  }
+
+  F.tet = { set: (a, b) => { USE_ONCUT = a; OFFS = b; }, DBG, tetMesh, linkHex, tetMatvec, tetPcg, tetBCs, assemble, tetSolve, tetResults };
+})(typeof FEA !== 'undefined' ? FEA : require('./engine.js'));
 </script>
 <script>
 'use strict';
@@ -853,7 +1448,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
 
   const S = {
     name: 'Sans titre', raw: null, unit: 'mm', tris: null, surf: null, gi: null, matIdx: 0, mat: Object.assign({}, MATS[0]),
-    h: 2, mesh: null, bcs: [], nextId: 1, activeBC: null, sel: null, selMode: 'auto', selTol: 20, hover: null, hoverSeed: -1,
+    h: 2, elType: 'hex', mesh: null, bcs: [], nextId: 1, activeBC: null, sel: null, selMode: 'auto', selTol: 20, hover: null, hoverSeed: -1,
     tab: 'model', res: null, stale: false, resField: 'vm', showDef: true, defMult: 1, fsTarget: 1.5, forceUnit: 'N',
     showEdges: true, showGrid: true, showLabels: true, opt: { mode: 'vol', vf: 40, fs: 2, iters: 60, x: null, thr: 0.5, info: '', ver: null, ctx: null, colorVm: true }, busy: false, cancel: false, probe: null
   };
@@ -1073,8 +1668,32 @@ if (typeof module !== 'undefined') module.exports = FEA;
     setBuf(name, { pos, nrm, col }); setBuf(name + 'L', { pos: lin, lines: true, color: [0.05, 0.07, 0.09] });
     return pos;
   }
+  /* faces de bord des tétraèdres -> 4 petits triangles par face (les nœuds de milieu montrent la courbure) */
+  const SUB = [0, 3, 5, 3, 1, 4, 5, 4, 2, 3, 4, 5];
+  function tetFaceBuffers(name, tm, u, k, colOf, base, lines) {
+    const bf = tm.bfaces, nf = tm.nbf, X = tm.coords, pos = new Float32Array(nf * 36), nrm = new Float32Array(nf * 36), col = new Float32Array(nf * 36), vals = colOf ? new Float32Array(nf * 12) : null, idx = new Int32Array(nf * 12);
+    for (let f = 0; f < nf; f++) for (let q = 0; q < 12; q++) {
+      const n = bf[f * 6 + SUB[q]], o = (f * 12 + q) * 3; idx[f * 12 + q] = n;
+      pos[o] = X[n * 3] + (u ? u[n * 3] * k : 0); pos[o + 1] = X[n * 3 + 1] + (u ? u[n * 3 + 1] * k : 0); pos[o + 2] = X[n * 3 + 2] + (u ? u[n * 3 + 2] * k : 0);
+      if (colOf) { const v = colOf(n); vals[f * 12 + q] = v.v; cmap(v.t, col, o); } else { col[o] = base[0]; col[o + 1] = base[1]; col[o + 2] = base[2]; }
+    }
+    for (let t = 0; t < nf * 4; t++) {
+      const o = t * 9, ux = pos[o + 3] - pos[o], uy = pos[o + 4] - pos[o + 1], uz = pos[o + 5] - pos[o + 2], vx = pos[o + 6] - pos[o], vy = pos[o + 7] - pos[o + 1], vz = pos[o + 8] - pos[o + 2];
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+      for (let q = 0; q < 3; q++) { nrm[o + q * 3] = nx; nrm[o + q * 3 + 1] = ny; nrm[o + q * 3 + 2] = nz; }
+    }
+    setBuf(name, { pos, nrm, col });
+    if (lines) {
+      const L = new Float32Array(nf * 36), E6 = [0, 3, 3, 1, 1, 4, 4, 2, 2, 5, 5, 0];
+      for (let f = 0; f < nf; f++) for (let q = 0; q < 12; q++) { const n = bf[f * 6 + E6[q]], o = (f * 12 + q) * 3; L[o] = X[n * 3]; L[o + 1] = X[n * 3 + 1]; L[o + 2] = X[n * 3 + 2]; }
+      setBuf(name + 'L', { pos: L, lines: true, color: [0.05, 0.07, 0.09] });
+    }
+    return { pos, vals };
+  }
   function meshBuffers() {
-    const m = S.mesh; if (!m) return; const mask = new Uint8Array(m.ne); for (let e = 0; e < m.ne; e++) if (m.fill[e] >= 0.5) mask[e] = 1;
+    const m = S.mesh; if (!m) return;
+    if (S.elType === 'tet' && m.tet) { tetFaceBuffers('mesh', m.tet, null, 0, null, [0.5, 0.62, 0.78], true); return; }
+    const mask = new Uint8Array(m.ne); for (let e = 0; e < m.ne; e++) if (m.fill[e] >= 0.5) mask[e] = 1;
     faceBuffers('mesh', FEA.extractFaces(m, mask), null, null, 0, [0.5, 0.62, 0.78]);
   }
   /* surface réelle (STL) redécoupée à la taille du maillage, pour y afficher les résultats */
@@ -1093,13 +1712,20 @@ if (typeof module !== 'undefined') module.exports = FEA;
     return S.dsp = { mesh: m, P, N };
   }
   function resRange() {
-    const r = S.res; if (S.resField === 'disp') return { lo: 0, hi: r.maxD || 1, unit: 'mm', title: 'Déplacement', rev: false, val: p => Math.hypot(r.sd[p * 3], r.sd[p * 3 + 1], r.sd[p * 3 + 2]) };
-    if (S.resField === 'fs') return { lo: 0, hi: 2 * S.fsTarget, unit: '', title: 'Facteur de sécurité', rev: true, val: p => S.mat.Sy / Math.max(r.sv[p], 1e-9) };
-    return { lo: 0, hi: r.maxVm || 1, unit: 'MPa', title: 'Contrainte de von Mises', rev: false, val: p => r.sv[p] };
+    const r = S.res, vm = r.tet ? r.vmN : r.sv; /* indice : nœud (tétraèdres) ou sommet d'affichage (cubes coupés) */
+    if (S.resField === 'disp') return { lo: 0, hi: r.maxD || 1, unit: 'mm', title: 'Déplacement', rev: false, val: p => r.tet ? r.dN[p] : Math.hypot(r.sd[p * 3], r.sd[p * 3 + 1], r.sd[p * 3 + 2]) };
+    if (S.resField === 'fs') return { lo: 0, hi: 2 * S.fsTarget, unit: '', title: 'Facteur de sécurité', rev: true, val: p => S.mat.Sy / Math.max(vm[p], 1e-9) };
+    return { lo: 0, hi: r.maxVm || 1, unit: 'MPa', title: 'Contrainte de von Mises', rev: false, val: p => vm[p] };
   }
   function defScale() { const r = S.res; if (!S.showDef || !r || !r.maxD) return 0; return S.defMult * r.auto; }
   function resBuffers() {
-    const r = S.res; if (!r || !S.dsp || S.dsp.mesh !== S.mesh) { setBuf('res', null); R.picks.res = null; return; }
+    const r = S.res;
+    if (r && r.tet) {
+      if (r.tet !== (S.mesh && S.mesh.tet)) { setBuf('res', null); R.picks.res = null; return; }
+      const g = resRange(), o = tetFaceBuffers('res', r.tet, r.u, defScale(), n => { const v = g.val(n), t = (v - g.lo) / (g.hi - g.lo); return { v, t: g.rev ? 1 - t : t }; }, null, false);
+      R.picks.res = { pos: o.pos, vals: o.vals, unit: g.unit }; return;
+    }
+    if (!r || !S.dsp || S.dsp.mesh !== S.mesh) { setBuf('res', null); R.picks.res = null; return; }
     const g = resRange(), k = defScale(), P = S.dsp.P, np = P.length / 3, pos = new Float32Array(P.length), col = new Float32Array(P.length), vals = new Float32Array(np);
     for (let p = 0; p < np; p++) {
       pos[p * 3] = P[p * 3] + r.sd[p * 3] * k; pos[p * 3 + 1] = P[p * 3 + 1] + r.sd[p * 3 + 1] * k; pos[p * 3 + 2] = P[p * 3 + 2] + r.sd[p * 3 + 2] * k;
@@ -1155,14 +1781,20 @@ if (typeof module !== 'undefined') module.exports = FEA;
     const bc = { id: S.nextId++, type, name: (type === 'fix' ? 'Appui ' : type === 'pin' ? 'Axe ' : type === 'disp' ? 'Déplacement ' : 'Force ') + n, tris, v: [0, 0, 0], free: [false, false, false], bearing: false, c: centroid(tris) };
     S.bcs.push(bc); S.activeBC = bc.id; S.sel.fill(0); S.stale = !!S.res; S.tab = 'study'; geoColors(); ui(); return bc;
   }
+  const meshOk = () => !!S.mesh && S.mesh.h === S.h && (S.elType === 'hex' || !!S.mesh.tet);
   function genMesh() {
     if (!S.tris) { toast('Chargez d\'abord une pièce.'); return false; }
     if (!(S.h > 0)) { toast('Taille d\'élément invalide.'); return false; }
-    const est = S.gi.volume / S.h ** 3, cells = S.gi.size[0] * S.gi.size[1] * S.gi.size[2] / S.h ** 3;
-    if (est > 1500000 || cells > 6e7) { toast('Maillage trop fin pour le navigateur (≈ ' + fmt(est) + ' éléments). Augmentez la taille d\'élément.'); return false; }
+    const est = S.gi.volume / S.h ** 3 * (S.elType === 'tet' ? 10 : 1), cells = S.gi.size[0] * S.gi.size[1] * S.gi.size[2] / S.h ** 3;
+    if (est > (S.elType === 'tet' ? 900000 : 1500000) || cells > 6e7) { toast('Maillage trop fin pour le navigateur (≈ ' + fmt(est) + ' éléments). Augmentez la taille d\'élément.'); return false; }
     const vox = FEA.voxelize(S.tris, S.h);
     if (!vox.count) { toast('Aucun élément créé : la taille d\'élément est trop grande pour cette pièce, ou le STL n\'est pas un volume fermé.'); return false; }
-    S.mesh = FEA.buildMesh(vox); S.res = null; S.opt.x = null; S.opt.ver = null; S.opt.ctx = null; resBuffers(); optBuffers(); meshBuffers(); return true;
+    const mesh = FEA.buildMesh(vox);
+    if (S.elType === 'tet') {
+      mesh.tet = FEA.tet.tetMesh(S.tris, S.h, mesh, S.surf);
+      if (!mesh.tet) { toast('Le maillage en tétraèdres a échoué : aucun élément créé. Essayez une taille plus petite, ou le maillage en cubes coupés.'); return false; }
+    }
+    S.mesh = mesh; S.res = null; S.opt.x = null; S.opt.ver = null; S.opt.ctx = null; resBuffers(); optBuffers(); meshBuffers(); return true;
   }
   const frame = () => new Promise(r => setTimeout(r, 0));
   function setProg(on, txt, frac) { $('#prog').classList.toggle('on', on); if (on) { $('#progT').textContent = txt; $('#progB').style.width = Math.round((frac || 0) * 100) + '%'; } }
@@ -1170,7 +1802,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     if (!S.tris) { toast('Chargez d\'abord une pièce.'); return null; }
     if (!S.bcs.some(b => b.type !== 'force')) { toast('Ajoutez au moins un appui : sans appui, la pièce est libre de bouger.'); S.tab = 'study'; ui(); return null; }
     if (!S.bcs.some(b => b.type === 'force' && Math.hypot(...b.v) > 0) && !S.bcs.some(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0))) { toast('Ajoutez au moins une force ou un déplacement imposé non nul.'); S.tab = 'study'; ui(); return null; }
-    if (!S.mesh || S.mesh.h !== S.h) { if (!genMesh()) return null; }
+    if (!meshOk()) { if (!genMesh()) return null; }
     const list = [], m = S.mesh, N = S.surf.normals;
     for (const b of S.bcs) {
       if (b.type === 'force') {
@@ -1184,7 +1816,12 @@ if (typeof module !== 'undefined') module.exports = FEA;
       for (let i = 0; i < nodes.length; i++) for (let c = 0; c < 3; c++) normals[i * 3 + c] = N[nodes.tri[i] * 3 + c];
       list.push({ type: b.type, nodes, normals, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v });
     }
-    return { nu: S.mat.nu, kpen: 4 * S.mat.E * m.h, list, pins: list.some(b => b.type === 'pin') };
+    let tet = null;
+    if (S.elType === 'tet') {
+      tet = FEA.tet.tetBCs(m.tet, N, S.surf.nt, S.bcs.map(b => ({ type: b.type, tris: b.tris, bearing: !!b.bearing, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v })));
+      for (let i = 0; i < tet.length; i++) if (!tet[i].nodes.length) { toast('« ' + S.bcs[i].name + ' » ne touche aucune face du maillage. Affinez le maillage.'); return null; }
+    }
+    return { nu: S.mat.nu, kpen: 4 * S.mat.E * m.h, list, tet, pins: list.some(b => b.type === 'pin') };
   }
   /* ---------- exécution du moteur dans un fil séparé (Web Worker), avec repli sur le fil principal ---------- */
   const GLUE = `
@@ -1195,6 +1832,7 @@ onmessage = async e => {
   try {
     a.tick = (...v) => { postMessage({ t: 'p', id: m.id, a: v }); };
     if (m.fn === 'solveContact') { const r = await FEA.solveContact(a); out = { u: r.u, fixed: r.fixed, f: r.f, nb: r.nb, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
+    else if (m.fn === 'tetSolve') { const r = await FEA.tet.tetSolve(a); out = { u: r.u, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
     else if (m.fn === 'pcg') { const r = await FEA.pcg(a); out = { x: a.x, iter: r.iter, converged: r.converged }; }
     else { a.onIter = (it, x, comp, ch, fs, vf) => { postMessage({ t: 'i', id: m.id, a: [it, Float64Array.from(x), comp, ch, fs, vf] }); }; const r = await FEA.topopt(a); out = { x: r.x, iter: r.iter, fs: r.fs }; }
     postMessage({ t: 'r', id: m.id, out });
@@ -1206,7 +1844,7 @@ onmessage = async e => {
     const a = Object.assign({}, args, { mesh: S.mesh, Ke: FEA.hexKe(args.nu) });
     a.tick = async (...v) => { if (hooks.tick) hooks.tick(...v); await frame(); return !S.cancel; };
     if (fn === 'topopt') a.onIter = async (...v) => { if (hooks.iter) hooks.iter(...v); await frame(); return !S.cancel; };
-    const r = await FEA[fn](a); if (fn === 'pcg') r.x = a.x; return r;
+    const r = await (fn === 'tetSolve' ? FEA.tet.tetSolve(a) : FEA[fn](a)); if (fn === 'pcg') r.x = a.x; return r;
   }
   function getWorker() {
     if (WK.w === null) {
@@ -1235,12 +1873,16 @@ onmessage = async e => {
     if (S.busy) return; const p = prepare(); if (!p) return;
     S.busy = true; S.cancel = false; ui(); const m = S.mesh, t0 = performance.now();
     setProg(true, 'Résolution…', 0); await frame();
-    let r; try { r = await run('solveContact', { nu: p.nu, kpen: p.kpen, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-6, mg: true }, { tick: solveTick('Résolution') }); } catch (err) { return fail(err); }
+    const tet = S.elType === 'tet'; let r;
+    try {
+      r = tet ? await run('tetSolve', { nu: p.nu, E: S.mat.E, kpen: p.kpen, bcs: p.tet, hexBcs: p.list.filter(b => b.type !== 'force'), tol: 1e-6 }, { tick: solveTick('Résolution') })
+        : await run('solveContact', { nu: p.nu, kpen: p.kpen, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-6, mg: true }, { tick: solveTick('Résolution') });
+    } catch (err) { return fail(err); }
     setProg(false); S.busy = false;
     if (r.cancelled) { toast('Calcul arrêté.', true); ui(); return; }
     if (!r.converged) { toast('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.'); ui(); return; }
-    S.res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.u);
-    const dm = displayMesh(), si = FEA.surfaceInterp(m, dm.P, dm.N, S.res); S.res.sv = si.vm; S.res.sd = si.disp;
+    if (tet) { S.res = FEA.tet.tetResults(m.tet, S.mat.E, S.mat.nu, r.u); S.res.tet = m.tet; }
+    else { S.res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.u); const dm = displayMesh(), si = FEA.surfaceInterp(m, dm.P, dm.N, S.res); S.res.sv = si.vm; S.res.sd = si.disp; }
     S.res.auto = S.res.maxD ? 0.05 * Math.hypot(...S.gi.size) / S.res.maxD : 0; S.res.iter = r.iter; S.res.rounds = p.pins ? r.rounds : 0; S.res.time = (performance.now() - t0) / 1000;
     S.stale = false; S.tab = 'results'; resBuffers(); ui();
   }
@@ -1309,7 +1951,7 @@ onmessage = async e => {
   function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Float32Array(u.buffer); }
   function save() {
     if (!S.raw) { toast('Rien à enregistrer : chargez d\'abord une pièce.'); return; }
-    const o = { app: 'aef3d', version: 1, name: S.name, unit: S.unit, tris: b64(S.raw), matIdx: S.matIdx, mat: S.mat, h: S.h, fsTarget: S.fsTarget, forceUnit: S.forceUnit, selMode: S.selMode, selTol: S.selTol, opt: { mode: S.opt.mode, vf: S.opt.vf, fs: S.opt.fs, iters: S.opt.iters }, bcs: S.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick })) };
+    const o = { app: 'aef3d', version: 1, name: S.name, unit: S.unit, tris: b64(S.raw), matIdx: S.matIdx, mat: S.mat, h: S.h, elType: S.elType, fsTarget: S.fsTarget, forceUnit: S.forceUnit, selMode: S.selMode, selTol: S.selTol, opt: { mode: S.opt.mode, vf: S.opt.vf, fs: S.opt.fs, iters: S.opt.iters }, bcs: S.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick })) };
     download(S.name.replace(/\.[^.]+$/, '') + '.aef.json', JSON.stringify(o), 'application/json');
   }
   function openFile(file) {
@@ -1319,7 +1961,7 @@ onmessage = async e => {
         if (/\.json$/i.test(file.name)) {
           const o = JSON.parse(new TextDecoder().decode(rd.result)); if (o.app !== 'aef3d') throw new Error('format');
           if (!loadGeometry(unb64(o.tris), o.name, o.unit)) return;
-          S.matIdx = o.matIdx; S.mat = o.mat; S.h = o.h; S.fsTarget = o.fsTarget || 1.5; S.forceUnit = o.forceUnit || 'N'; S.selMode = o.selMode || 'auto'; S.selTol = o.selTol || 20; Object.assign(S.opt, o.opt || {});
+          S.matIdx = o.matIdx; S.mat = o.mat; S.h = o.h; S.elType = o.elType === 'tet' ? 'tet' : 'hex'; S.fsTarget = o.fsTarget || 1.5; S.forceUnit = o.forceUnit || 'N'; S.selMode = o.selMode || 'auto'; S.selTol = o.selTol || 20; Object.assign(S.opt, o.opt || {});
           S.bcs = o.bcs.map(b => Object.assign({ id: S.nextId++, c: centroid(b.tris) }, b)); geoColors(); ui();
         } else loadGeometry(FEA.parseSTL(rd.result), file.name);
       } catch (err) { toast('Impossible de lire ce fichier (' + err.message + ').'); }
@@ -1346,7 +1988,7 @@ onmessage = async e => {
   const num = (path, val, step, extra) => `<input type="number" data-set="${path}" value="${val}" step="${step || 'any'}" ${extra || ''}>`;
   function checks() {
     const sup = S.bcs.filter(b => b.type !== 'force').length, ld = S.bcs.filter(b => b.type === 'force' && Math.hypot(...b.v) > 0).length + S.bcs.filter(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0)).length;
-    return { geo: !!S.tris, mesh: !!S.mesh && S.mesh.h === S.h, sup, ld, ready: !!S.tris && sup > 0 && ld > 0 };
+    return { geo: !!S.tris, mesh: meshOk(), sup, ld, ready: !!S.tris && sup > 0 && ld > 0 };
   }
   function panelModel() {
     let h = `<div class="sec">GÉOMÉTRIE</div><div class="btns"><button class="btn" data-act="import">Importer un STL…</button><button class="btn" data-act="demo">Charger l'exemple</button></div>`;
@@ -1367,13 +2009,16 @@ onmessage = async e => {
   function panelMesh() {
     if (!S.tris) return `<div class="sec">MAILLAGE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
     const est = S.gi.volume / S.h ** 3, mn = Math.min(...S.gi.size);
-    let h = `<div class="sec">MAILLAGE <span class="tag">SURFACE RÉELLE</span></div><div class="card"><div class="row"><span>Taille d'élément (mm)</span>${num('h', S.h)}</div>
-    <div class="row"><span>Éléments estimés</span><span class="val">≈ ${fmt(est, 2)}</span></div><div class="row"><span>Éléments dans la plus petite dimension</span><span class="val">${fmt(mn / S.h, 2)}</span></div></div>
+    const tet = S.elType === 'tet', tm = S.mesh && S.mesh.tet;
+    let h = `<div class="sec">MAILLAGE <span class="tag">SURFACE RÉELLE</span></div><label class="f" style="margin-top:0">Type d'élément</label><div class="seg full"><button data-eltype="hex" class="${tet ? '' : 'on'}">Cubes coupés</button><button data-eltype="tet" class="${tet ? 'on' : ''}">Tétraèdres</button></div><div class="card"><div class="row"><span>Taille d'élément (mm)</span>${num('h', S.h)}</div>
+    <div class="row"><span>Éléments estimés</span><span class="val">≈ ${fmt(est * (tet ? 10 : 1), 1)}</span></div><div class="row"><span>Éléments dans la plus petite dimension</span><span class="val">${fmt(mn / S.h, 2)}</span></div></div>
     <div class="btns"><button class="btn" data-act="hfine">Plus fin</button><button class="btn" data-act="hcoarse">Plus grossier</button></div>
     <button class="btn primary wide" data-act="mesh">Générer le maillage</button>
-    <div class="mut small" style="margin-top:10px">La grille reste cubique, mais les éléments de bordure sont coupés par la vraie surface de la pièce : alésages et congés sont pris en compte tels que dessinés. Visez au moins 4 éléments dans l'épaisseur des zones chargées. Le calcul tourne en arrière-plan : comptez quelques secondes jusqu'à 50 000 éléments, de l'ordre d'une minute vers 300 000.</div>`;
-    if (S.mesh) h += `<div class="sec">MAILLAGE ACTUEL</div><div class="card"><div class="row"><span>Éléments</span><span class="val">${fmt(S.mesh.ne, 7)}</span></div><div class="row"><span>Nœuds</span><span class="val">${fmt(S.mesh.nn, 7)}</span></div>
-    <div class="row"><span>dont coupés par la surface</span><span class="val">${fmt(S.mesh.ncut, 7)}</span></div><div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(S.mesh.vol / S.gi.volume * 100, 4)} %</span></div></div>${S.mesh.h !== S.h ? '<div class="chk"><i class="wn"></i><span>La taille a changé : régénérez le maillage.</span></div>' : ''}`;
+    <div class="mut small" style="margin-top:10px">${tet ? 'Tétraèdres à 10 nœuds dont les faces suivent la surface de la pièce (bords courbes, arêtes vives conservées). Ils sont précis même avec peu d\'éléments : une taille égale à la moitié ou au tiers de l\'épaisseur suffit souvent. Comptez environ 10 s pour 15 000 tétraèdres. L\'optimisation topologique continue d\'utiliser les cubes coupés.' : 'La grille reste cubique, mais les éléments de bordure sont coupés par la vraie surface de la pièce : alésages et congés sont pris en compte tels que dessinés. Visez au moins 4 éléments dans l\'épaisseur des zones chargées.'} Le calcul tourne en arrière-plan : comptez quelques secondes jusqu'à 50 000 éléments, de l'ordre d'une minute vers 300 000.</div>`;
+    if (S.mesh && tet && tm) h += `<div class="sec">MAILLAGE ACTUEL</div><div class="card"><div class="row"><span>Tétraèdres</span><span class="val">${fmt(tm.nt, 7)}</span></div><div class="row"><span>Nœuds</span><span class="val">${fmt(tm.nn, 7)}</span></div><div class="row"><span>dont éléments à bord courbe</span><span class="val">${fmt(tm.ncv, 7)}</span></div>
+    <div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(tm.vtot / S.gi.volume * 100, 4)} %</span></div></div>${meshOk() ? '' : '<div class="chk"><i class="wn"></i><span>La taille a changé : régénérez le maillage.</span></div>'}`;
+    else if (S.mesh) h += `<div class="sec">MAILLAGE ACTUEL</div><div class="card"><div class="row"><span>Éléments</span><span class="val">${fmt(S.mesh.ne, 7)}</span></div><div class="row"><span>Nœuds</span><span class="val">${fmt(S.mesh.nn, 7)}</span></div>
+    <div class="row"><span>dont coupés par la surface</span><span class="val">${fmt(S.mesh.ncut, 7)}</span></div><div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(S.mesh.vol / S.gi.volume * 100, 4)} %</span></div></div>${meshOk() ? '' : '<div class="chk"><i class="wn"></i><span>Le réglage a changé : régénérez le maillage.</span></div>'}`;
     return h;
   }
   function chips(types) {
@@ -1400,7 +2045,7 @@ onmessage = async e => {
     } else h += `<div class="mut small" style="margin-top:12px">Cliquez une ou plusieurs faces dans la vue, puis créez un appui ou une charge avec les boutons du panneau de droite. Cliquez une étiquette ci-dessus pour la modifier.</div>`;
     h += `<div class="sec">PRÊT POUR LE CALCUL ?</div>
     <div class="chk"><i class="${c.geo ? '' : 'no'}"></i><span>Pièce chargée · matériau : ${esc(S.mat.n)}</span></div>
-    <div class="chk"><i class="${c.mesh ? '' : 'wn'}"></i><span>${c.mesh ? fmt(S.mesh.ne, 7) + ' éléments' : 'Le maillage sera généré automatiquement (taille ' + fmt(S.h) + ' mm)'}</span></div>
+    <div class="chk"><i class="${c.mesh ? '' : 'wn'}"></i><span>${c.mesh ? (S.elType === 'tet' ? fmt(S.mesh.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments') : 'Le maillage sera généré automatiquement (taille ' + fmt(S.h) + ' mm)'}</span></div>
     <div class="chk"><i class="${c.sup ? '' : 'no'}"></i><span>${c.sup} appui(s)</span></div><div class="chk"><i class="${c.ld ? '' : 'no'}"></i><span>${c.ld} charge(s) non nulle(s)</span></div>
     <button class="btn primary wide" data-act="calc" style="margin-top:8px" ${S.busy ? 'disabled' : ''}>Calculer</button>`;
     return h;
@@ -1418,7 +2063,7 @@ onmessage = async e => {
     <div class="sec">AFFICHAGE</div><div class="seg full"><button data-res="vm" class="${S.resField === 'vm' ? 'on' : ''}">von Mises</button><button data-res="disp" class="${S.resField === 'disp' ? 'on' : ''}">Déplacement</button><button data-res="fs" class="${S.resField === 'fs' ? 'on' : ''}">Sécurité</button></div>
     <div class="row" style="margin-top:12px"><span><input type="checkbox" data-set="showDef" ${S.showDef ? 'checked' : ''}> Afficher la déformée</span></div>
     <div class="row"><span>Amplification (× auto)</span>${num('defMult', S.defMult, 0.5)}</div>
-    <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.<br><br>${fmt(S.mesh.ne, 7)} éléments · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
+    <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.<br><br>${r.tet ? fmt(r.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'} · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
   }
   function panelOpt() {
     if (!S.tris) return `<div class="sec">OPTIMISATION TOPOLOGIQUE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
@@ -1429,7 +2074,7 @@ onmessage = async e => {
     <div class="row"><span>Itérations maximales</span>${num('opt.iters', o.iters, 10, 'min="5" max="300"')}</div>${c ? `<div class="row"><span>FS de la pièce pleine</span><span class="val">${fmt(c.fs0, 3)}</span></div>` : ''}</div>
     <div class="mut small" style="margin-bottom:10px">${fsM ? 'La matière est retirée peu à peu tant que le facteur de sécurité (limite élastique ÷ von Mises maximale) reste au-dessus de la cible. La forme finale est ensuite recalculée pour contrôle. La cible doit être inférieure au facteur de sécurité de la pièce pleine.' : 'La pièce est allégée jusqu\'au pourcentage demandé, puis recalculée pour afficher son facteur de sécurité.'}</div>
     <button class="btn primary wide" data-act="opt" ${S.busy ? 'disabled' : ''}>Lancer l'optimisation</button>
-    <div class="mut small" style="margin-top:10px">Chaque itération refait un calcul complet : commencez avec un maillage modéré (20 000 à 60 000 éléments).</div>`;
+    <div class="mut small" style="margin-top:10px">Chaque itération refait un calcul complet : commencez avec un maillage modéré (20 000 à 60 000 éléments).${S.elType === 'tet' ? ' L\'optimisation se fait toujours sur les cubes coupés, à la même taille d\'élément.' : ''}</div>`;
     if (o.x) {
       const kept = o.kept || 0, v = verOk(), fail = o.ver && o.ver.fail && o.ver.thr === o.thr;
       const cls = v ? (v.fs >= (fsM ? 0.97 * o.fs : S.fsTarget) ? 'ok' : v.fs >= 1 ? 'wn' : 'no') : '';
@@ -1463,7 +2108,7 @@ onmessage = async e => {
       <div class="ln"><i style="background:#eb503c"></i>Déformée × ${fmt(defScale(), 3)}</div><div class="mut" style="margin-top:6px">${S.probe ? 'Au point visé : <b style="color:#fff">' + S.probe + '</b>' : 'Survolez la pièce pour lire la valeur.'}</div>`;
     } else if (S.tab === 'opt' && S.opt.x && S.opt.colorVm && !S.busy && verOk()) h = `<div class="t">Forme optimisée · von Mises <span>(MPa)</span></div><div class="bar"></div><div class="mm"><span>0</span><span>${fmt(verOk().maxVm, 3)}</span></div><div class="mut" style="margin-top:6px">${S.probe ? 'Au point visé : <b style="color:#fff">' + S.probe + '</b>' : 'Survolez la pièce pour lire la valeur.'}</div>`;
     else if (S.tab === 'opt' && S.opt.x) h = `<div class="t">Forme optimisée</div><div class="ln"><i style="background:#e8855c"></i>Matière conservée (densité > ${fmt(S.opt.thr, 2)})</div>`;
-    else if ((S.tab === 'mesh' || S.tab === 'results' || S.tab === 'opt') && S.mesh) h = `<div class="t">Maillage <span>(éléments de ${fmt(S.mesh.h)} mm)</span></div><div class="ln"><i style="background:#809ec7"></i>${fmt(S.mesh.ne, 7)} éléments</div>`;
+    else if ((S.tab === 'mesh' || S.tab === 'results' || S.tab === 'opt') && S.mesh) h = `<div class="t">Maillage <span>(éléments de ${fmt(S.mesh.h)} mm)</span></div><div class="ln"><i style="background:#809ec7"></i>${S.elType === 'tet' && S.mesh.tet ? fmt(S.mesh.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'}</div>`;
     else if (S.tris) h = `<div class="t">Géométrie</div><div class="ln"><i style="background:#e8734f"></i>Sélection</div><div class="ln"><i style="background:${hex(BCC.fix)}"></i>Appui fixe</div><div class="ln"><i style="background:${hex(BCC.pin)}"></i>Axe / boulon</div><div class="ln"><i style="background:${hex(BCC.disp)}"></i>Déplacement imposé</div><div class="ln"><i style="background:${hex(BCC.force)}"></i>Force</div>`;
     L.innerHTML = h; L.style.display = h ? '' : 'none';
   }
@@ -1472,7 +2117,7 @@ onmessage = async e => {
     $('#steps').innerHTML = TABS.map(([k, n]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><span class="dot ${ok[k] ? 'ok' : (k === 'results' && S.res ? 'warn' : '')}">${ok[k] ? '✓' : ''}</span>${n}</button>`).join('');
     $('#panel').innerHTML = { model: panelModel, mesh: panelMesh, study: panelStudy, results: panelResults, opt: panelOpt }[S.tab]();
     $('#right').innerHTML = rightPanel(); $('#fname').textContent = S.name;
-    $('#stL').textContent = S.mesh ? fmt(S.mesh.nn, 7) + ' nœuds · ' + fmt(S.mesh.ne, 7) + ' éléments' : S.tris ? fmt(S.surf.nt, 7) + ' triangles' : 'Aucune pièce';
+    $('#stL').textContent = S.mesh && S.elType === 'tet' && S.mesh.tet ? fmt(S.mesh.tet.nn, 7) + ' nœuds · ' + fmt(S.mesh.tet.nt, 7) + ' tétraèdres' : S.mesh ? fmt(S.mesh.nn, 7) + ' nœuds · ' + fmt(S.mesh.ne, 7) + ' éléments' : S.tris ? fmt(S.surf.nt, 7) + ' triangles' : 'Aucune pièce';
     $('#stR').textContent = 'Axe vertical Y · mm · ' + S.forceUnit + ' · MPa';
     legend(); R.need = true;
   }
@@ -1489,13 +2134,14 @@ onmessage = async e => {
     opt: runOpt, optstl: exportOptSTL, closemodal: () => $('#modal').classList.remove('on')
   };
   document.addEventListener('click', e => {
-    const t = e.target.closest('[data-act],[data-tab],[data-view],[data-res],[data-mode],[data-optmode]');
+    const t = e.target.closest('[data-act],[data-tab],[data-view],[data-res],[data-mode],[data-optmode],[data-eltype]');
     if (!e.target.closest('.menu')) $('#viewMenu').classList.remove('open');
     if (!t || t.disabled) return; const d = t.dataset;
     if (d.act) { if (S.busy && d.act !== 'stop' && d.act !== 'help' && d.act !== 'closemodal' && d.act !== 'menu' && d.act !== 'fit') return; ACT[d.act](t); }
     else if (d.tab) { S.tab = d.tab; S.probe = null; geoColors(); optBuffers(); if (d.tab === 'results') resBuffers(); ui(); }
     else if (d.view) setView(d.view);
     else if (d.res) { S.resField = d.res; S.probe = null; resBuffers(); ui(); }
+    else if (d.eltype) { if (!S.busy && S.elType !== d.eltype) { S.elType = d.eltype; if (S.gi) S.h = +(defaultH() * (d.eltype === 'tet' ? 2 : 1)).toPrecision(2); S.res = null; resBuffers(); ui(); } }
     else if (d.optmode) { if (!S.busy) { S.opt.mode = d.optmode; ui(); } }
     else if (d.mode) { S.selMode = d.mode; S.hoverSeed = -1; S.hoverMask = null; ui(); }
   });
@@ -1527,7 +2173,7 @@ onmessage = async e => {
     $('#modal').innerHTML = `<div class="box"><h2>Analyse éléments finis 3D — aide</h2>
     <h3>Déroulement</h3><ol><li><b>Modèle</b> : importez le STL de la pièce, vérifiez les dimensions et choisissez le matériau.</li><li><b>Maillage</b> : réglez la taille d'élément et générez le maillage.</li><li><b>Étude</b> : cliquez les faces dans la vue, puis créez les appuis et les forces (panneau de droite).</li><li><b>Calculer</b>, puis lisez le bilan dans <b>Résultats</b>.</li><li><b>Optimisation</b> (facultatif) : cherchez la matière inutile sous le même cas de charge, en visant une quantité de matière ou un facteur de sécurité.</li></ol>
     <h3>Exporter depuis SolidWorks</h3><p>Fichier › Enregistrer sous › STL (*.stl). Dans Options : unité « Millimètres », résolution « Fine ». Une résolution fine donne des alésages plus ronds et des sélections de faces plus propres.</p>
-    <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>La pièce est découpée en petits cubes ; ceux qui touchent la surface sont coupés selon la vraie géométrie. Plus ils sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide et sans jeu, et la matière glisse autour de lui (ou non, avec l'option « Boulon serré »).</li></ul>
+    <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>Deux maillages au choix : des cubes coupés par la vraie surface (robuste, sert aussi à l'optimisation), ou des tétraèdres à 10 nœuds (plus précis à nombre d'éléments égal). Plus les éléments sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide et sans jeu, et la matière glisse autour de lui (ou non, avec l'option « Boulon serré »).</li></ul>
     <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis fixes et dans les angles rentrants vifs sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
     <h3>Souris</h3><p>Clic gauche : tourner · clic droit : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p>
     <div class="btns" style="justify-content:flex-end"><button class="btn primary" data-act="closemodal">Fermer</button></div></div>`;
