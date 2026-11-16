@@ -134,8 +134,8 @@ kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;border:1px solid 
 
 <script id="engine">
 'use strict';
-/* Moteur de calcul : STL, topologie de surface, voxelisation, éléments hexaédriques,
-   solveur gradient conjugué sans matrice, contraintes, optimisation topologique (SIMP). */
+/* Moteur de calcul : STL, topologie de surface, découpe en cellules, éléments hexaédriques (cellules coupées
+   par la vraie surface), gradient conjugué multigrille sans matrice, contraintes, optimisation topologique (SIMP). */
 const FEA = (function () {
 
   /* ---------- STL ---------- */
@@ -228,44 +228,59 @@ const FEA = (function () {
   }
 
   /* ---------- Voxelisation ---------- */
+  /* Découpe la pièce sur une grille de pas h. Chaque cellule est divisée en 8 octants ;
+     frac[cellule*8 + octant] = part de l'octant occupée par la matière (0 à 1), mesurée par
+     des rayons selon z (s×s rayons par cellule, longueur exacte le long de z). */
   function voxelize(tris, h) {
-    const gi = geomInfo(tris);
-    const n = [0, 0, 0], o = [0, 0, 0];
+    const gi = geomInfo(tris), n = [0, 0, 0], o = [0, 0, 0];
     for (let c = 0; c < 3; c++) { n[c] = Math.max(1, Math.ceil(gi.size[c] / h - 1e-6)); o[c] = (gi.min[c] + gi.max[c]) / 2 - n[c] * h / 2; }
     const [nx, ny, nz] = n, [ox, oy, oz] = o;
-    const cols = new Array(nx * ny), px = h * 1.37e-4, py = h * 2.11e-4;
-    for (let i = 0; i < tris.length; i += 9) {
-      const ax = tris[i], ay = tris[i + 1], az = tris[i + 2], bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5], cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
-      const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
-      if (Math.abs(d) < 1e-14) continue;
-      const i0 = Math.max(0, Math.ceil((Math.min(ax, bx, cx) - ox - px) / h - 0.5)), i1 = Math.min(nx - 1, Math.floor((Math.max(ax, bx, cx) - ox - px) / h - 0.5));
-      const j0 = Math.max(0, Math.ceil((Math.min(ay, by, cy) - oy - py) / h - 0.5)), j1 = Math.min(ny - 1, Math.floor((Math.max(ay, by, cy) - oy - py) / h - 0.5));
-      for (let j = j0; j <= j1; j++) {
-        const y = oy + (j + 0.5) * h + py;
-        for (let ii = i0; ii <= i1; ii++) {
-          const x = ox + (ii + 0.5) * h + px;
-          const u = ((x - ax) * (cy - ay) - (cx - ax) * (y - ay)) / d, v = ((bx - ax) * (y - ay) - (x - ax) * (by - ay)) / d;
-          if (u < 0 || v < 0 || u + v > 1) continue;
-          const c = ii + nx * j; (cols[c] || (cols[c] = [])).push(az + u * (bz - az) + v * (cz - az));
+    const s = nx * ny * 100 <= 2e7 ? 10 : nx * ny * 64 <= 2e7 ? 8 : nx * ny * 36 <= 2e7 ? 6 : 4, hs = h / s, NX = nx * s, NY = ny * s, px = hs * 1.37e-4, py = hs * 2.11e-4;
+    const cnt = new Int32Array(NX * NY + 1); let zs = null;
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < tris.length; i += 9) {
+        const ax = tris[i], ay = tris[i + 1], az = tris[i + 2], bx = tris[i + 3], by = tris[i + 4], bz = tris[i + 5], cx = tris[i + 6], cy = tris[i + 7], cz = tris[i + 8];
+        const d = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+        if (Math.abs(d) < 1e-14) continue;
+        const i0 = Math.max(0, Math.ceil((Math.min(ax, bx, cx) - ox - px) / hs - 0.5)), i1 = Math.min(NX - 1, Math.floor((Math.max(ax, bx, cx) - ox - px) / hs - 0.5));
+        const j0 = Math.max(0, Math.ceil((Math.min(ay, by, cy) - oy - py) / hs - 0.5)), j1 = Math.min(NY - 1, Math.floor((Math.max(ay, by, cy) - oy - py) / hs - 0.5));
+        for (let j = j0; j <= j1; j++) {
+          const y = oy + (j + 0.5) * hs + py;
+          for (let ii = i0; ii <= i1; ii++) {
+            const x = ox + (ii + 0.5) * hs + px;
+            const u = ((x - ax) * (cy - ay) - (cx - ax) * (y - ay)) / d, v = ((bx - ax) * (y - ay) - (x - ax) * (by - ay)) / d;
+            if (u < 0 || v < 0 || u + v > 1) continue;
+            const c = ii + NX * j;
+            if (pass === 0) cnt[c + 1]++; else zs[cnt[c]++] = az + u * (bz - az) + v * (cz - az);
+          }
+        }
+      }
+      if (pass === 0) { for (let c = 0; c < NX * NY; c++) cnt[c + 1] += cnt[c]; zs = new Float64Array(cnt[NX * NY]); }
+    }
+    /* après la 2e passe, cnt[c] = fin du segment de la colonne c */
+    const frac = new Float32Array(nx * ny * nz * 8), hh = h / 2, wr = 4 / (s * s);
+    for (let J = 0; J < NY; J++) for (let I = 0; I < NX; I++) {
+      const c = I + NX * J, e = cnt[c], b = c ? cnt[c - 1] : 0; if (e - b < 2) continue;
+      for (let a = b + 1; a < e; a++) { const v = zs[a]; let k = a - 1; while (k >= b && zs[k] > v) { zs[k + 1] = zs[k]; k--; } zs[k + 1] = v; }
+      const i = (I / s) | 0, j = (J / s) | 0, oq = ((I % s) * 2 >= s ? 1 : 0) + ((J % s) * 2 >= s ? 2 : 0), cell = i + nx * j;
+      for (let m = b; m + 1 < e; m += 2) {
+        const z0 = zs[m], z1 = zs[m + 1], k0 = Math.max(0, Math.floor((z0 - oz) / hh)), k1 = Math.min(2 * nz - 1, Math.floor((z1 - oz) / hh));
+        for (let kk = k0; kk <= k1; kk++) {
+          const lo = oz + kk * hh, len = Math.min(z1, lo + hh) - Math.max(z0, lo); if (len <= 0) continue;
+          frac[(cell + nx * ny * (kk >> 1)) * 8 + oq + (kk & 1) * 4] += len / hh * wr;
         }
       }
     }
     const inside = new Uint8Array(nx * ny * nz);
-    for (let c = 0; c < cols.length; c++) {
-      const a = cols[c]; if (!a) continue; a.sort((p, q) => p - q);
-      for (let m = 0; m + 1 < a.length; m += 2) {
-        const k0 = Math.max(0, Math.ceil((a[m] - oz) / h - 0.5)), k1 = Math.min(nz - 1, Math.floor((a[m + 1] - oz) / h - 0.5));
-        for (let k = k0; k <= k1; k++) inside[c + nx * ny * k] = 1;
-      }
-    }
+    for (let g = 0; g < inside.length; g++) { let t = 0; for (let q = 0; q < 8; q++) { const v = frac[g * 8 + q]; if (v > 0.999) frac[g * 8 + q] = 1; t += v; } if (t > 0.16) inside[g] = 1; }
     /* ne garder que le plus gros bloc connecté par les faces */
     const lab = new Int32Array(inside.length), stack = new Int32Array(inside.length); let best = 0, bestN = 0, nl = 0;
     const sxy = nx * ny;
-    for (let s = 0; s < inside.length; s++) {
-      if (!inside[s] || lab[s]) continue;
-      const L = ++nl; let sp = 0, cnt = 0; stack[sp++] = s; lab[s] = L;
+    for (let s0 = 0; s0 < inside.length; s0++) {
+      if (!inside[s0] || lab[s0]) continue;
+      const L = ++nl; let sp = 0, c2 = 0; stack[sp++] = s0; lab[s0] = L;
       while (sp) {
-        const g = stack[--sp]; cnt++;
+        const g = stack[--sp]; c2++;
         const i = g % nx, j = ((g / nx) | 0) % ny, k = (g / sxy) | 0;
         if (i > 0 && inside[g - 1] && !lab[g - 1]) { lab[g - 1] = L; stack[sp++] = g - 1; }
         if (i < nx - 1 && inside[g + 1] && !lab[g + 1]) { lab[g + 1] = L; stack[sp++] = g + 1; }
@@ -274,45 +289,43 @@ const FEA = (function () {
         if (k > 0 && inside[g - sxy] && !lab[g - sxy]) { lab[g - sxy] = L; stack[sp++] = g - sxy; }
         if (k < nz - 1 && inside[g + sxy] && !lab[g + sxy]) { lab[g + sxy] = L; stack[sp++] = g + sxy; }
       }
-      if (cnt > bestN) { bestN = cnt; best = L; }
+      if (c2 > bestN) { bestN = c2; best = L; }
     }
-    for (let s = 0; s < inside.length; s++) inside[s] = lab[s] === best && best ? 1 : 0;
-    return { nx, ny, nz, h, ox, oy, oz, inside, count: bestN };
+    for (let g = 0; g < inside.length; g++) inside[g] = lab[g] === best && best ? 1 : 0;
+    return { nx, ny, nz, h, ox, oy, oz, inside, count: bestN, frac };
   }
 
-  /* ---------- Maillage hexaédrique ---------- */
+  /* ---------- Maillage : cellules cubiques, coupées par la vraie surface en bordure ---------- */
   const FACE_L = [[0, 4, 6, 2], [1, 3, 7, 5], [0, 1, 5, 4], [2, 6, 7, 3], [0, 2, 3, 1], [4, 5, 7, 6]];
   const FACE_N = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]];
+  const AMIN = 1e-3; /* rigidité fictive des octants vides (évite les nœuds flottants) */
 
   function buildMesh(vox) {
-    const { nx, ny, nz, h, ox, oy, oz, inside } = vox, ne = vox.count;
+    const { nx, ny, nz, h, ox, oy, oz, inside, frac } = vox, ne = vox.count;
     const mx = nx + 1, my = ny + 1;
     const nodeMap = new Int32Array(mx * my * (nz + 1)).fill(-1), elemOf = new Int32Array(nx * ny * nz).fill(-1);
-    const conn = new Int32Array(ne * 8), elemG = new Int32Array(ne); let e = 0, nn = 0;
+    const conn = new Int32Array(ne * 8), elemG = new Int32Array(ne), oct = new Float32Array(ne * 8), cut = new Uint8Array(ne), fill = new Float32Array(ne); let e = 0, nn = 0, vol = 0, ncut = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const g = i + nx * (j + ny * k); if (!inside[g]) continue;
-      elemOf[g] = e; elemG[e] = g;
+      elemOf[g] = e; elemG[e] = g; let t = 0;
       for (let l = 0; l < 8; l++) {
         const gn = (i + (l & 1)) + mx * ((j + ((l >> 1) & 1)) + my * (k + ((l >> 2) & 1)));
         if (nodeMap[gn] < 0) nodeMap[gn] = nn++;
         conn[e * 8 + l] = nodeMap[gn];
+        const a = frac ? Math.min(1, frac[g * 8 + l]) : 1; t += a; oct[e * 8 + l] = Math.max(AMIN, a); if (a < 1) cut[e] = 1;
       }
-      e++;
+      fill[e] = t / 8; vol += t / 8; ncut += cut[e]; e++;
     }
     const coords = new Float64Array(nn * 3);
     for (let k = 0; k <= nz; k++) for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) {
       const id = nodeMap[i + mx * (j + my * k)]; if (id < 0) continue;
       coords[id * 3] = ox + i * h; coords[id * 3 + 1] = oy + j * h; coords[id * 3 + 2] = oz + k * h;
     }
-    const mesh = { nx, ny, nz, h, ox, oy, oz, ne, nn, conn, coords, nodeMap, elemOf, elemG };
+    const mesh = { nx, ny, nz, h, ox, oy, oz, ne, nn, conn, coords, nodeMap, elemOf, elemG, oct, cut, fill, vol: vol * h * h * h, ncut };
     mesh.faces = extractFaces(mesh, null);
-    const na = new Float32Array(nn), q = mesh.faces.quads;
-    for (let i = 0; i < q.length; i++) na[q[i]] += 1;
-    mesh.nodeArea = na;
     return mesh;
   }
 
-  /* faces visibles : mask = Uint8Array par élément (null = tous) */
   function extractFaces(mesh, mask) {
     const { nx, ny, nz, ne, conn, elemOf, elemG } = mesh, sxy = nx * ny;
     const quads = [], dir = [], elem = [];
@@ -331,14 +344,17 @@ const FEA = (function () {
     return { quads: Int32Array.from(quads), dir: Uint8Array.from(dir), elem: Int32Array.from(elem), n: dir.length };
   }
 
-  /* matrice de rigidité d'un cube unité (E = 1, côté = 1) ; K réel = E·h·Ke */
+  /* Matrice de rigidité d'un cube unité (E = 1, côté = 1) ; K réel = E·h·Ke.
+     Ke.B et Ke.DB donnent, pour chacun des 8 points de Gauss, B et D·B/8 : la rigidité d'une cellule coupée
+     est la somme des contributions de ses octants, chacune pondérée par sa part de matière. */
+  const KE_CACHE = new Map();
   function hexKe(nu) {
+    if (KE_CACHE.has(nu)) return KE_CACHE.get(nu);
     const K = new Float64Array(576), l = nu / ((1 + nu) * (1 - 2 * nu)), m = 1 / (2 * (1 + nu));
     const D = [[l + 2 * m, l, l, 0, 0, 0], [l, l + 2 * m, l, 0, 0, 0], [l, l, l + 2 * m, 0, 0, 0], [0, 0, 0, m, 0, 0], [0, 0, 0, 0, m, 0], [0, 0, 0, 0, 0, m]];
-    const g = 1 / Math.sqrt(3), B = new Float64Array(144), DB = new Float64Array(144);
+    const g = 1 / Math.sqrt(3), BB = new Float64Array(8 * 144), DBB = new Float64Array(8 * 144), dg = new Float64Array(8 * 24);
     for (let gp = 0; gp < 8; gp++) {
-      const xi = (gp & 1 ? g : -g), et = ((gp >> 1) & 1 ? g : -g), ze = ((gp >> 2) & 1 ? g : -g);
-      B.fill(0);
+      const xi = (gp & 1 ? g : -g), et = ((gp >> 1) & 1 ? g : -g), ze = ((gp >> 2) & 1 ? g : -g), B = BB.subarray(gp * 144, gp * 144 + 144), DB = DBB.subarray(gp * 144, gp * 144 + 144);
       for (let a = 0; a < 8; a++) {
         const sx = (a & 1) * 2 - 1, sy = ((a >> 1) & 1) * 2 - 1, sz = ((a >> 2) & 1) * 2 - 1;
         const dx = sx * (1 + et * sy) * (1 + ze * sz) / 4, dy = sy * (1 + xi * sx) * (1 + ze * sz) / 4, dz = sz * (1 + xi * sx) * (1 + et * sy) / 4;
@@ -346,18 +362,50 @@ const FEA = (function () {
         B[c] = dx; B[24 + c + 1] = dy; B[48 + c + 2] = dz;
         B[72 + c] = dy; B[72 + c + 1] = dx; B[96 + c + 1] = dz; B[96 + c + 2] = dy; B[120 + c] = dz; B[120 + c + 2] = dx;
       }
-      for (let r = 0; r < 6; r++) for (let c = 0; c < 24; c++) { let s = 0; for (let q = 0; q < 6; q++) s += D[r][q] * B[q * 24 + c]; DB[r * 24 + c] = s; }
-      for (let i = 0; i < 24; i++) for (let j = 0; j < 24; j++) { let s = 0; for (let r = 0; r < 6; r++) s += B[r * 24 + i] * DB[r * 24 + j]; K[i * 24 + j] += s / 8; }
+      for (let r = 0; r < 6; r++) for (let c = 0; c < 24; c++) { let s = 0; for (let q = 0; q < 6; q++) s += D[r][q] * B[q * 24 + c]; DB[r * 24 + c] = s / 8; }
+      for (let i = 0; i < 24; i++) for (let j = 0; j < 24; j++) { let s = 0; for (let r = 0; r < 6; r++) s += B[r * 24 + i] * DB[r * 24 + j]; K[i * 24 + j] += s; if (i === j) dg[gp * 24 + i] = s; }
     }
-    return K;
+    K.B = BB; K.DB = DBB; K.dg = dg; K.nu = nu;
+    /* borne de λmax(D⁻¹A) : plus grande valeur propre de diag(Kg)⁻¹·Kg, sur l'élément plein et sur un octant seul */
+    let mu = 0;
+    for (let c = 0; c < 2; c++) {
+      const v = new Float64Array(24), w = new Float64Array(24); let lam = 1; for (let i = 0; i < 24; i++) v[i] = Math.sin(i * 1.7 + 0.3);
+      for (let it = 0; it < 300; it++) {
+        let nw = 0, nv = 0;
+        for (let i = 0; i < 24; i++) {
+          let s = 0;
+          if (c === 0) for (let j = 0; j < 24; j++) s += K[i * 24 + j] * v[j];
+          else for (let r = 0; r < 6; r++) { let t = 0; for (let j = 0; j < 24; j++) t += DBB[r * 24 + j] * v[j]; s += BB[r * 24 + i] * t; }
+          w[i] = s / (c === 0 ? K[i * 25] : dg[i]); nw += w[i] * w[i]; nv += v[i] * v[i];
+        }
+        lam = Math.sqrt(nw / nv); for (let i = 0; i < 24; i++) v[i] = w[i] / Math.sqrt(nw);
+      }
+      mu = Math.max(mu, lam);
+    }
+    K.mu = mu * 1.02; KE_CACHE.set(nu, K); return K;
   }
 
-  function matvec(mesh, Ke, scale, x, y) {
-    const { ne, conn } = mesh, ue = new Float64Array(24); y.fill(0);
+  /* fe = Ke(e)·ue pour une cellule coupée (somme pondérée sur les octants) */
+  const SG = new Float64Array(6);
+  function cutKu(Ke, oct, e, ue, fe) {
+    const B = Ke.B, DB = Ke.DB; fe.fill(0);
+    for (let g = 0; g < 8; g++) {
+      const al = oct[e * 8 + g], o = g * 144;
+      for (let r = 0; r < 6; r++) { let t = 0; const p = o + r * 24; for (let j = 0; j < 24; j++) t += DB[p + j] * ue[j]; SG[r] = t * al; }
+      const s0 = SG[0], s1 = SG[1], s2 = SG[2], s3 = SG[3], s4 = SG[4], s5 = SG[5];
+      for (let j = 0; j < 24; j++) fe[j] += B[o + j] * s0 + B[o + 24 + j] * s1 + B[o + 48 + j] * s2 + B[o + 72 + j] * s3 + B[o + 96 + j] * s4 + B[o + 120 + j] * s5;
+    }
+  }
+  /* y = A·x. l : maillage ou niveau de multigrille. l.cut/l.oct : cellules coupées ; l.nb : ressorts nodaux (blocs 3×3 symétriques : xx,yy,zz,xy,yz,zx) */
+  function matvec(l, Ke, scale, x, y) {
+    const { ne, conn } = l, cut = l.cut, oct = l.oct, ue = new Float64Array(24), fe = new Float64Array(24); y.fill(0);
     for (let e = 0; e < ne; e++) {
-      const s = scale[e], b = e * 8;
+      const s = scale[e], b = e * 8; if (s === 0) continue;
       for (let a = 0; a < 8; a++) { const n = conn[b + a] * 3, c = a * 3; ue[c] = x[n]; ue[c + 1] = x[n + 1]; ue[c + 2] = x[n + 2]; }
-      for (let a = 0; a < 8; a++) {
+      if (cut && cut[e]) {
+        cutKu(Ke, oct, e, ue, fe);
+        for (let a = 0; a < 8; a++) { const n = conn[b + a] * 3, c = a * 3; y[n] += s * fe[c]; y[n + 1] += s * fe[c + 1]; y[n + 2] += s * fe[c + 2]; }
+      } else for (let a = 0; a < 8; a++) {
         const n = conn[b + a] * 3;
         for (let c = 0; c < 3; c++) {
           const row = (a * 3 + c) * 24; let sum = 0;
@@ -366,25 +414,31 @@ const FEA = (function () {
         }
       }
     }
+    const nb = l.nb;
+    if (nb) for (let n = 0, nn = l.nn; n < nn; n++) {
+      const b = n * 6; if (nb[b] === 0 && nb[b + 1] === 0 && nb[b + 2] === 0) continue;
+      const x0 = x[n * 3], x1 = x[n * 3 + 1], x2 = x[n * 3 + 2];
+      y[n * 3] += nb[b] * x0 + nb[b + 3] * x1 + nb[b + 5] * x2; y[n * 3 + 1] += nb[b + 3] * x0 + nb[b + 1] * x1 + nb[b + 4] * x2; y[n * 3 + 2] += nb[b + 5] * x0 + nb[b + 4] * x1 + nb[b + 2] * x2;
+    }
+  }
+  function diagOf(l, Ke, scale, D) {
+    const { ne, conn } = l, cut = l.cut, oct = l.oct, dg = Ke.dg;
+    for (let e = 0; e < ne; e++) {
+      const s = scale[e]; if (s === 0) continue;
+      if (cut && cut[e]) { for (let g = 0; g < 8; g++) { const al = s * oct[e * 8 + g]; for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) D[conn[e * 8 + a] * 3 + c] += al * dg[g * 24 + a * 3 + c]; } }
+      else for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) D[conn[e * 8 + a] * 3 + c] += s * Ke[(a * 3 + c) * 25];
+    }
+    if (l.nb) for (let n = 0; n < l.nn; n++) for (let c = 0; c < 3; c++) D[n * 3 + c] += l.nb[n * 6 + c];
   }
 
   /* ---------- Multigrille géométrique (préconditionneur) ----------
-     Niveaux obtenus en regroupant les voxels 2×2×2 ; rigidité grossière = moyenne des enfants ;
+     Niveaux obtenus en regroupant les cellules 2×2×2 ; rigidité grossière = moyenne des enfants ;
      interpolation trilinéaire ; lissage de Tchebychev (symétrique, donc utilisable dans le gradient conjugué). */
-  let KE_MU = null, KE_REF = null; const P = { deg: 2, al: 8 };
-  function keMu(Ke) { /* borne de λmax(D⁻¹A) : plus grande valeur propre de diag(Ke)⁻¹·Ke */
-    if (KE_REF === Ke) return KE_MU;
-    let v = new Float64Array(24), w = new Float64Array(24), lam = 1; for (let i = 0; i < 24; i++) v[i] = Math.sin(i * 1.7 + 0.3);
-    for (let it = 0; it < 300; it++) {
-      let nrm = 0; for (let i = 0; i < 24; i++) { let s = 0; for (let j = 0; j < 24; j++) s += Ke[i * 24 + j] * v[j]; w[i] = s / Ke[i * 25]; nrm += w[i] * w[i]; }
-      lam = Math.sqrt(nrm); let n0 = 0; for (let i = 0; i < 24; i++) n0 += v[i] * v[i]; lam /= Math.sqrt(n0); for (let i = 0; i < 24; i++) v[i] = w[i] / Math.sqrt(nrm);
-    }
-    KE_REF = Ke; return (KE_MU = lam * 1.02);
-  }
+  const P = { deg: 2, al: 8 };
   function coarsen(f) {
     const nx = Math.ceil(f.nx / 2), ny = Math.ceil(f.ny / 2), nz = Math.ceil(f.nz / 2), mx = nx + 1, my = ny + 1;
     const acc = new Float64Array(nx * ny * nz), has = new Uint8Array(nx * ny * nz), fsxy = f.nx * f.ny;
-    for (let e = 0; e < f.ne; e++) { const g = f.elemG[e], G = ((g % f.nx) >> 1) + nx * (((((g / f.nx) | 0) % f.ny) >> 1) + ny * (((g / fsxy) | 0) >> 1)); acc[G] += f.scale[e]; has[G] = 1; }
+    for (let e = 0; e < f.ne; e++) { const g = f.elemG[e], G = ((g % f.nx) >> 1) + nx * (((((g / f.nx) | 0) % f.ny) >> 1) + ny * (((g / fsxy) | 0) >> 1)); acc[G] += f.scale[e] * (f.fill ? f.fill[e] : 1); has[G] = 1; }
     let ne = 0; for (let g = 0; g < has.length; g++) ne += has[g];
     const nodeMap = new Int32Array(mx * my * (nz + 1)).fill(-1), conn = new Int32Array(ne * 8), elemG = new Int32Array(ne), scale = new Float64Array(ne); let e = 0, nn = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
@@ -393,7 +447,7 @@ const FEA = (function () {
       e++;
     }
     /* table d'interpolation : pour chaque nœud fin, jusqu'à 8 nœuds grossiers et leurs poids */
-    const pc = new Int32Array(f.nn * 8).fill(-1), pw = new Float32Array(f.nn * 8), fixed = new Uint8Array(nn * 3), fmx = f.nx + 1, fmy = f.ny + 1;
+    const pc = new Int32Array(f.nn * 8).fill(-1), pw = new Float32Array(f.nn * 8), fixed = new Uint8Array(nn * 3), fmx = f.nx + 1, fmy = f.ny + 1, nb = f.nb ? new Float64Array(nn * 6) : null;
     for (let k = 0; k <= f.nz; k++) for (let j = 0; j <= f.ny; j++) for (let i = 0; i <= f.nx; i++) {
       const id = f.nodeMap[i + fmx * (j + fmy * k)]; if (id < 0) continue; let m = 0;
       const ni = i & 1 ? 2 : 1, nj = j & 1 ? 2 : 1, nk = k & 1 ? 2 : 1, w = 1 / (ni * nj * nk);
@@ -401,21 +455,21 @@ const FEA = (function () {
         const cn = nodeMap[((i >> 1) + a) + mx * (((j >> 1) + b) + my * ((k >> 1) + c))]; if (cn < 0) continue;
         pc[id * 8 + m] = cn; pw[id * 8 + m] = w; m++;
         for (let d = 0; d < 3; d++) if (f.fixed[id * 3 + d]) fixed[cn * 3 + d] = 1;
+        if (nb) for (let d = 0; d < 6; d++) nb[cn * 6 + d] += w * f.nb[id * 6 + d];
       }
     }
     f.pc = pc; f.pw = pw;
-    return { nx, ny, nz, ne, nn, conn, nodeMap, elemG, scale, fixed };
+    return { nx, ny, nz, ne, nn, conn, nodeMap, elemG, scale, fixed, nb };
   }
-  function mgSetup(mesh, Ke, scale, fixed) {
-    const L = [{ nx: mesh.nx, ny: mesh.ny, nz: mesh.nz, ne: mesh.ne, nn: mesh.nn, conn: mesh.conn, nodeMap: mesh.nodeMap, elemG: mesh.elemG, scale, fixed }];
+  function mgSetup(mesh, Ke, scale, fixed, nb) {
+    const L = [{ nx: mesh.nx, ny: mesh.ny, nz: mesh.nz, ne: mesh.ne, nn: mesh.nn, conn: mesh.conn, nodeMap: mesh.nodeMap, elemG: mesh.elemG, cut: mesh.cut, oct: mesh.oct, fill: mesh.fill, scale, fixed, nb }];
     while (L.length < 9) { const f = L[L.length - 1]; if (f.ne <= 40 || Math.max(f.nx, f.ny, f.nz) <= 2) break; L.push(coarsen(f)); }
     for (const l of L) {
-      const n = l.nn * 3, D = new Float64Array(n);
-      for (let e = 0; e < l.ne; e++) for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) D[l.conn[e * 8 + a] * 3 + c] += l.scale[e] * Ke[(a * 3 + c) * 25];
+      const n = l.nn * 3, D = new Float64Array(n); diagOf(l, Ke, l.scale, D);
       for (let i = 0; i < n; i++) D[i] = l.fixed[i] || !(D[i] > 0) ? 0 : 1 / D[i];
       l.iD = D; l.r = new Float64Array(n); l.d = new Float64Array(n); l.q = new Float64Array(n); l.b = new Float64Array(n); l.x = new Float64Array(n);
     }
-    return { L, Ke, mu: keMu(Ke) };
+    return { L, Ke, mu: nb ? Math.max(Ke.mu, 3.06) : Ke.mu };
   }
   function cheb(mg, l, b, x, fromZero, deg, alpha, needRes) {
     const { iD, r, d, q, fixed } = l, n = iD.length, lmax = mg.mu, lmin = lmax / alpha, th = (lmax + lmin) / 2, de = (lmax - lmin) / 2, sg = th / de; let rho = 1 / sg;
@@ -447,26 +501,26 @@ const FEA = (function () {
   }
 
   /* Gradient conjugué préconditionné. x contient les déplacements imposés (et un départ à chaud).
-     o.mg = true : préconditionneur multigrille ; sinon Jacobi. */
+     o.mg = true : préconditionneur multigrille ; sinon Jacobi. o.nb : ressorts nodaux (contact). */
   async function pcg(o) {
     const { mesh, Ke, scale, fixed, x, f } = o, tol = o.tol || 1e-6, maxIter = o.maxIter || 20000, tick = o.tick;
     const n = mesh.nn * 3, r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), q = new Float64Array(n);
-    const { ne, conn } = mesh; let M = null, mg = null;
-    if (o.mg && ne > 400) mg = mgSetup(mesh, Ke, scale, fixed);
-    else { M = new Float64Array(n); for (let e = 0; e < ne; e++) for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) M[conn[e * 8 + a] * 3 + c] += scale[e] * Ke[(a * 3 + c) * 25]; for (let i = 0; i < n; i++) M[i] = M[i] > 0 ? 1 / M[i] : 0; }
+    const A = Object.create(mesh); A.nb = o.nb || null; let M = null, mg = null;
+    if (o.mg && mesh.ne > 400) mg = mgSetup(mesh, Ke, scale, fixed, A.nb);
+    else { M = new Float64Array(n); diagOf(A, Ke, scale, M); for (let i = 0; i < n; i++) M[i] = M[i] > 0 ? 1 / M[i] : 0; }
     const prec = mg ? () => vcycle(mg, 0, r, z) : () => { for (let i = 0; i < n; i++) z[i] = r[i] * M[i]; };
     for (let i = 0; i < n; i++) p[i] = fixed[i] ? x[i] : 0;
-    matvec(mesh, Ke, scale, p, q);
+    matvec(A, Ke, scale, p, q);
     let bn = 0; for (let i = 0; i < n; i++) if (!fixed[i]) { const b = f[i] - q[i]; bn += b * b; }
     bn = Math.sqrt(bn);
     if (bn === 0) { for (let i = 0; i < n; i++) if (!fixed[i]) x[i] = 0; return { iter: 0, res: 0, converged: true }; }
-    matvec(mesh, Ke, scale, x, q);
+    matvec(A, Ke, scale, x, q);
     let rz = 0, rr = 0;
     for (let i = 0; i < n; i++) { r[i] = fixed[i] ? 0 : f[i] - q[i]; rr += r[i] * r[i]; }
     prec(); for (let i = 0; i < n; i++) { p[i] = z[i]; rz += r[i] * z[i]; }
     let res = Math.sqrt(rr) / bn, it = 0, last = Date.now();
     while (res > tol && it < maxIter) {
-      matvec(mesh, Ke, scale, p, q);
+      matvec(A, Ke, scale, p, q);
       let pq = 0; for (let i = 0; i < n; i++) { if (fixed[i]) q[i] = 0; pq += p[i] * q[i]; }
       if (!(pq > 0)) return { iter: it, res, converged: false };
       const al = rz / pq; rr = 0;
@@ -513,9 +567,9 @@ const FEA = (function () {
     return (px - qx) * (px - qx) + (py - qy) * (py - qy) + (pz - qz) * (pz - qz);
   }
 
-  /* nœuds de surface du maillage situés à moins de tol des triangles choisis ; .tri = triangle le plus proche de chaque nœud */
+  /* nœuds du maillage à moins de tol des triangles choisis (des deux côtés de la surface) ; .tri = triangle le plus proche */
   function nodesNearTris(mesh, tris, list, tol) {
-    const { nx, ny, nz, h, ox, oy, oz, nodeMap, nodeArea } = mesh, mx = nx + 1, my = ny + 1;
+    const { nx, ny, nz, h, ox, oy, oz, nodeMap } = mesh, mx = nx + 1, my = ny + 1;
     const best = new Float32Array(mesh.nn).fill(Infinity), bt = new Int32Array(mesh.nn), out = [], t2 = tol * tol;
     for (const t of list) {
       const i = t * 9;
@@ -523,7 +577,7 @@ const FEA = (function () {
       const j0 = Math.max(0, Math.ceil((Math.min(tris[i + 1], tris[i + 4], tris[i + 7]) - tol - oy) / h)), j1 = Math.min(ny, Math.floor((Math.max(tris[i + 1], tris[i + 4], tris[i + 7]) + tol - oy) / h));
       const k0 = Math.max(0, Math.ceil((Math.min(tris[i + 2], tris[i + 5], tris[i + 8]) - tol - oz) / h)), k1 = Math.min(nz, Math.floor((Math.max(tris[i + 2], tris[i + 5], tris[i + 8]) + tol - oz) / h));
       for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
-        const id = nodeMap[ii + mx * (j + my * k)]; if (id < 0 || !nodeArea[id]) continue;
+        const id = nodeMap[ii + mx * (j + my * k)]; if (id < 0) continue;
         const d = d2PointTri(ox + ii * h, oy + j * h, oz + k * h, tris, i); if (d > t2 || d >= best[id]) continue;
         if (best[id] === Infinity) out.push(id); best[id] = d; bt[id] = t;
       }
@@ -531,95 +585,150 @@ const FEA = (function () {
     const nodes = Int32Array.from(out); nodes.tri = Int32Array.from(out, n => bt[n]); return nodes;
   }
 
-  /* bcs : [{type:'fix'|'disp'|'pin'|'force', nodes, v:[x,y,z], normals?, active?, bearing?}]
-     'disp' : une composante null est libre ; 'pin' : seuls les nœuds actifs (en appui) sont bloqués ;
-     'force' + bearing : charge de palier, appliquée seulement du côté où l'axe pousse sur la matière */
-  function buildBC(mesh, bcs) {
-    const n = mesh.nn * 3, fixed = new Uint8Array(n), x = new Float64Array(n), f = new Float64Array(n);
+  /* cellule du maillage contenant un point de la surface (on recule un peu vers l'intérieur de la matière) ; coordonnées locales dans LOC */
+  const LOC = new Float64Array(3);
+  function locate(mesh, x, y, z, nx_, ny_, nz_) {
+    const { nx, ny, nz, h, ox, oy, oz, elemOf } = mesh;
+    for (let t = 0; t < 4; t++) {
+      const b = [0.02, 0.35, 0.7, 1.2][t] * h, qx = x - nx_ * b, qy = y - ny_ * b, qz = z - nz_ * b;
+      const i = Math.min(nx - 1, Math.max(0, Math.floor((qx - ox) / h))), j = Math.min(ny - 1, Math.max(0, Math.floor((qy - oy) / h))), k = Math.min(nz - 1, Math.max(0, Math.floor((qz - oz) / h)));
+      const e = elemOf[i + nx * (j + ny * k)]; if (e < 0) continue;
+      LOC[0] = Math.min(1, Math.max(0, (x - ox) / h - i)); LOC[1] = Math.min(1, Math.max(0, (y - oy) / h - j)); LOC[2] = Math.min(1, Math.max(0, (z - oz) / h - k));
+      return e;
+    }
+    return -1;
+  }
+  /* Charge répartie sur la vraie surface : chaque triangle est échantillonné, et chaque échantillon est reporté
+     sur les 8 nœuds de sa cellule (charge nodale cohérente). bearing : seuls les endroits où la force pousse
+     sur la matière sont chargés, avec un poids en cosinus. Retourne les nœuds et leurs poids (somme = 1). */
+  function surfaceLoad(mesh, tris, N, list, v, bearing) {
+    const acc = new Float64Array(mesh.nn), h = mesh.h, conn = mesh.conn, m = Math.hypot(v[0], v[1], v[2]) || 1; let W = 0;
+    for (let pass = 0; pass < 2 && W === 0; pass++) for (const t of list) {
+      const i = t * 9, nx = N[t * 3], ny = N[t * 3 + 1], nz = N[t * 3 + 2];
+      let wt = 1; if (bearing && pass === 0) { wt = -(v[0] * nx + v[1] * ny + v[2] * nz) / m; if (wt <= 0) continue; }
+      const e1 = Math.hypot(tris[i + 3] - tris[i], tris[i + 4] - tris[i + 1], tris[i + 5] - tris[i + 2]), e2 = Math.hypot(tris[i + 6] - tris[i], tris[i + 7] - tris[i + 1], tris[i + 8] - tris[i + 2]), e3 = Math.hypot(tris[i + 6] - tris[i + 3], tris[i + 7] - tris[i + 4], tris[i + 8] - tris[i + 5]);
+      const ux = tris[i + 3] - tris[i], uy = tris[i + 4] - tris[i + 1], uz = tris[i + 5] - tris[i + 2], vx = tris[i + 6] - tris[i], vy = tris[i + 7] - tris[i + 1], vz = tris[i + 8] - tris[i + 2];
+      const area = 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx); if (!(area > 0)) continue;
+      const n = Math.min(60, Math.max(1, Math.ceil(Math.max(e1, e2, e3) / (0.5 * h)))), w = wt * area / (n * n);
+      for (let a = 0; a < n; a++) for (let b = 0; b < 2 * (n - a) - 1; b++) {
+        /* centre du sous-triangle (a, b) */
+        const up = b & 1, bb = b >> 1, s = (a + (up ? 2 / 3 : 1 / 3)) / n, r = (bb + (up ? 2 / 3 : 1 / 3)) / n;
+        const x = tris[i] + ux * r + vx * s, y = tris[i + 1] + uy * r + vy * s, z = tris[i + 2] + uz * r + vz * s;
+        const e = locate(mesh, x, y, z, nx, ny, nz); if (e < 0) continue;
+        for (let c = 0; c < 8; c++) acc[conn[e * 8 + c]] += w * (c & 1 ? LOC[0] : 1 - LOC[0]) * (c & 2 ? LOC[1] : 1 - LOC[1]) * (c & 4 ? LOC[2] : 1 - LOC[2]);
+        W += w;
+      }
+    }
+    const nodes = [], ws = []; if (W > 0) for (let nd = 0; nd < mesh.nn; nd++) if (acc[nd] > 0) { nodes.push(nd); ws.push(acc[nd] / W); }
+    return { nodes: Int32Array.from(nodes), w: Float64Array.from(ws) };
+  }
+
+  /* bcs : [{type:'fix'|'disp'|'pin'|'force', nodes, ...}]
+     'fix'/'disp' : déplacements imposés aux nœuds (pour 'disp', une composante null est libre) ;
+     'force' : nodes + w (poids) + v (force totale) ;
+     'pin' : ressorts très raides selon la normale sur les nœuds actifs (l'axe pousse, la matière peut glisser autour) ;
+             stick : ressorts dans toutes les directions (boulon serré). kpen : raideur des ressorts. */
+  function buildBC(mesh, bcs, kpen) {
+    const n = mesh.nn * 3, fixed = new Uint8Array(n), x = new Float64Array(n), f = new Float64Array(n); let nb = null;
     for (const b of bcs) {
-      if (b.type === 'force') {
-        const mk = new Uint8Array(mesh.nn), wt = new Float32Array(mesh.nn), q = mesh.faces.quads; for (const nd of b.nodes) mk[nd] = 1;
-        for (let i = 0; i < q.length; i += 4) if (mk[q[i]] && mk[q[i + 1]] && mk[q[i + 2]] && mk[q[i + 3]]) { wt[q[i]]++; wt[q[i + 1]]++; wt[q[i + 2]]++; wt[q[i + 3]]++; }
-        const m = Math.hypot(b.v[0], b.v[1], b.v[2]); let W = 0;
-        const w = new Float64Array(b.nodes.length);
-        for (let i = 0; i < b.nodes.length; i++) { w[i] = wt[b.nodes[i]] || 0.5; if (b.bearing && m > 0) w[i] *= Math.max(0, -(b.v[0] * b.normals[i * 3] + b.v[1] * b.normals[i * 3 + 1] + b.v[2] * b.normals[i * 3 + 2]) / m); W += w[i]; }
-        if (!(W > 0)) { W = 0; for (let i = 0; i < w.length; i++) { w[i] = wt[b.nodes[i]] || 0.5; W += w[i]; } }
-        for (let i = 0; i < b.nodes.length; i++) for (let c = 0; c < 3; c++) f[b.nodes[i] * 3 + c] += b.v[c] * w[i] / W;
+      if (b.type === 'force') { for (let i = 0; i < b.nodes.length; i++) for (let c = 0; c < 3; c++) f[b.nodes[i] * 3 + c] += b.v[c] * b.w[i]; }
+      else if (b.type === 'pin') {
+        if (!nb) nb = new Float64Array(mesh.nn * 6);
+        const kt = kpen * (b.stick ? 1 : 0.02);
+        for (let i = 0; i < b.nodes.length; i++) {
+          if (b.active && !b.active[i]) continue;
+          const q = b.nodes[i] * 6, nx = b.normals[i * 3], ny = b.normals[i * 3 + 1], nz = b.normals[i * 3 + 2], k = b.stick ? 0 : kpen;
+          nb[q] += k * nx * nx + kt; nb[q + 1] += k * ny * ny + kt; nb[q + 2] += k * nz * nz + kt; nb[q + 3] += k * nx * ny; nb[q + 4] += k * ny * nz; nb[q + 5] += k * nz * nx;
+        }
       } else for (let i = 0; i < b.nodes.length; i++) {
-        if (b.type === 'pin' && b.active && !b.active[i]) continue;
         const nd = b.nodes[i];
         for (let c = 0; c < 3; c++) { const val = b.type === 'disp' ? b.v[c] : 0; if (val === null || val === undefined) continue; fixed[nd * 3 + c] = 1; x[nd * 3 + c] = val; }
       }
     }
-    return { fixed, x, f };
+    return { fixed, x, f, nb };
   }
 
-  /* Résolution avec contact unilatéral pour les appuis « axe / boulon » :
-     on bloque d'abord toute la surface, puis on libère les nœuds où l'appui devrait tirer sur la matière
-     (un axe ne peut que pousser) et on rebloque ceux qui pénètrent dans l'axe, jusqu'à stabilité. */
+  /* Résolution avec contact unilatéral pour les appuis « axe / boulon » : un nœud est en appui tant qu'il
+     pousse contre l'axe (déplacement vers l'extérieur de la matière) ; s'il s'en écarte, son ressort est retiré.
+     On recalcule jusqu'à ce que la zone de contact ne change plus. */
   async function solveContact(o) {
-    const { mesh, Ke, scale, bcs } = o, n = mesh.nn * 3, pins = bcs.filter(b => b.type === 'pin');
+    const { mesh, Ke, scale, bcs } = o, n = mesh.nn * 3, pins = bcs.filter(b => b.type === 'pin'), kpen = o.kpen;
     for (const b of pins) if (!b.active) b.active = new Uint8Array(b.nodes.length).fill(1);
-    let u = null, bc = null, r = null, round = 0, last = !pins.length; const q = new Float64Array(n), tol = o.tol || 1e-6;
+    let u = null, bc = null, r = null, round = 0, last = !pins.length; const tol = o.tol || 1e-6;
     for (; ;) {
-      round++; bc = buildBC(mesh, bcs);
+      round++; bc = buildBC(mesh, bcs, kpen);
       if (u) for (let i = 0; i < n; i++) if (!bc.fixed[i]) bc.x[i] = u[i];
-      /* passes intermédiaires à tolérance relâchée, dernière passe à pleine précision */
-      r = await pcg({ mesh, Ke, scale, fixed: bc.fixed, x: bc.x, f: bc.f, tol: last ? tol : Math.max(tol, 1e-3), maxIter: o.maxIter, mg: o.mg, tick: o.tick ? (it, res) => o.tick(it, res, round) : null });
+      r = await pcg({ mesh, Ke, scale, fixed: bc.fixed, x: bc.x, f: bc.f, nb: bc.nb, tol: last ? tol : Math.max(tol, 1e-3), maxIter: o.maxIter, mg: o.mg, tick: o.tick ? (it, res) => o.tick(it, res, round) : null });
       u = bc.x; if (!r.converged || last) break;
-      matvec(mesh, Ke, scale, u, q); let rmax = 0, changed = 0;
-      for (const b of pins) for (let i = 0; i < b.nodes.length; i++) if (b.active[i]) { const nd = b.nodes[i] * 3; rmax = Math.max(rmax, Math.hypot(q[nd] - bc.f[nd], q[nd + 1] - bc.f[nd + 1], q[nd + 2] - bc.f[nd + 2])); }
+      let umax = 0, changed = 0; for (const b of pins) for (let i = 0; i < b.nodes.length; i++) { const nd = b.nodes[i] * 3; umax = Math.max(umax, Math.abs(u[nd] * b.normals[i * 3] + u[nd + 1] * b.normals[i * 3 + 1] + u[nd + 2] * b.normals[i * 3 + 2])); }
       for (const b of pins) {
-        let act = 0, bestI = -1, bestR = Infinity; const rel = [];
+        let act = 0, bi = -1, bg = -Infinity; const off = [];
         for (let i = 0; i < b.nodes.length; i++) {
-          if (!b.active[i]) continue;
-          const nd = b.nodes[i] * 3, rn = (q[nd] - bc.f[nd]) * b.normals[i * 3] + (q[nd + 1] - bc.f[nd + 1]) * b.normals[i * 3 + 1] + (q[nd + 2] - bc.f[nd + 2]) * b.normals[i * 3 + 2];
-          if (rn < bestR) { bestR = rn; bestI = i; }
-          if (rn > 1e-3 * rmax) rel.push(i); else act++;
+          const nd = b.nodes[i] * 3, g = u[nd] * b.normals[i * 3] + u[nd + 1] * b.normals[i * 3 + 1] + u[nd + 2] * b.normals[i * 3 + 2];
+          if (g > bg) { bg = g; bi = i; }
+          if (b.active[i]) { if (g < -1e-6 * umax) off.push(i); else act++; }
+          else if (g > 1e-6 * umax && round <= 5) { b.active[i] = 1; act++; changed++; }
         }
-        for (const i of rel) { if (!act && i === bestI) continue; b.active[i] = 0; changed++; }
+        for (const i of off) { if (!act && i === bi) continue; b.active[i] = 0; changed++; }
       }
-      if (!changed || round >= 8) last = true;
+      let np = 0; for (const b of pins) np += b.nodes.length;
+      if (changed <= Math.max(1, 0.01 * np) || round >= 8) last = true;
     }
-    return { u, fixed: bc.fixed, f: bc.f, iter: r.iter, converged: r.converged, cancelled: r.cancelled, rounds: round };
+    return { u, fixed: bc.fixed, f: bc.f, nb: bc.nb, iter: r.iter, converged: r.converged, cancelled: r.cancelled, rounds: round };
   }
 
   /* ---------- Post-traitement ---------- */
-  /* Contraintes aux nœuds : déformations normales évaluées aux coins de l'élément (valeur en surface),
-     cisaillements au centre (évite le cisaillement parasite), tenseur moyenné aux nœuds.
+  /* Contraintes aux nœuds : déformations normales évaluées aux coins de la cellule, cisaillements au centre,
+     tenseur moyenné aux nœuds en pondérant chaque coin par la part de matière de son octant.
+     wN = poids total du nœud (8 = nœud en pleine matière, 0 = nœud hors matière).
      dens (facultatif) : densité par élément ; les éléments quasi vides sont ignorés. */
   function computeResults(mesh, E, nu, u, dens) {
-    const { ne, nn, conn, h } = mesh, S = new Float32Array(nn * 6), vmN = new Float32Array(nn), cnt = new Uint16Array(nn), dN = new Float32Array(nn);
+    const { ne, nn, conn, h, oct, cut } = mesh, S = new Float32Array(nn * 6), vmN = new Float32Array(nn), wN = new Float32Array(nn), dN = new Float32Array(nn);
     const l = E * nu / ((1 + nu) * (1 - 2 * nu)), m = E / (2 * (1 + nu)), k = 1 / (4 * h), ih = 1 / h;
     for (let e = 0; e < ne; e++) {
       let w = 1; if (dens) { if (dens[e] < 0.3) continue; w = Math.sqrt(dens[e]); }
-      const b = e * 8; let gxy = 0, gyz = 0, gzx = 0;
+      const b = e * 8, ct = cut && cut[e]; let gxy = 0, gyz = 0, gzx = 0;
       for (let a = 0; a < 8; a++) {
         const n = conn[b + a] * 3, sx = ((a & 1) * 2 - 1) * k, sy = (((a >> 1) & 1) * 2 - 1) * k, sz = (((a >> 2) & 1) * 2 - 1) * k;
         gxy += sy * u[n] + sx * u[n + 1]; gyz += sz * u[n + 1] + sy * u[n + 2]; gzx += sz * u[n] + sx * u[n + 2];
       }
       const sxy = w * m * gxy, syz = w * m * gyz, szx = w * m * gzx;
       for (let a = 0; a < 8; a++) {
+        const al = ct ? oct[b + a] : 1; if (al < 0.01) continue;
         const exx = (u[conn[b + (a | 1)] * 3] - u[conn[b + (a & 6)] * 3]) * ih;
         const eyy = (u[conn[b + (a | 2)] * 3 + 1] - u[conn[b + (a & 5)] * 3 + 1]) * ih;
         const ezz = (u[conn[b + (a | 4)] * 3 + 2] - u[conn[b + (a & 3)] * 3 + 2]) * ih;
-        const tr = l * (exx + eyy + ezz), n = conn[b + a], q = n * 6;
-        S[q] += w * (tr + 2 * m * exx); S[q + 1] += w * (tr + 2 * m * eyy); S[q + 2] += w * (tr + 2 * m * ezz); S[q + 3] += sxy; S[q + 4] += syz; S[q + 5] += szx; cnt[n]++;
+        const tr = l * (exx + eyy + ezz), n = conn[b + a], q = n * 6, wa = w * al;
+        S[q] += wa * (tr + 2 * m * exx); S[q + 1] += wa * (tr + 2 * m * eyy); S[q + 2] += wa * (tr + 2 * m * ezz); S[q + 3] += al * sxy; S[q + 4] += al * syz; S[q + 5] += al * szx; wN[n] += al;
       }
     }
-    let maxD = 0, maxVm = 0, nu2 = 0; const used = [];
+    let maxD = 0, maxVm = 0; const used = [];
     for (let n = 0; n < nn; n++) {
-      if (!cnt[n]) continue;
-      const c = 1 / cnt[n], q = n * 6, sxx = S[q] * c, syy = S[q + 1] * c, szz = S[q + 2] * c, sxy = S[q + 3] * c, syz = S[q + 4] * c, szx = S[q + 5] * c;
+      dN[n] = Math.hypot(u[n * 3], u[n * 3 + 1], u[n * 3 + 2]);
+      if (!(wN[n] > 0.05)) continue;
+      const c = 1 / wN[n], q = n * 6, sxx = S[q] * c, syy = S[q + 1] * c, szz = S[q + 2] * c, sxy = S[q + 3] * c, syz = S[q + 4] * c, szx = S[q + 5] * c;
       vmN[n] = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * (sxy * sxy + syz * syz + szx * szx));
-      if (vmN[n] > maxVm) maxVm = vmN[n]; used.push(vmN[n]);
-      dN[n] = Math.hypot(u[n * 3], u[n * 3 + 1], u[n * 3 + 2]); if (dN[n] > maxD) maxD = dN[n];
+      if (wN[n] >= 1) { if (vmN[n] > maxVm) maxVm = vmN[n]; used.push(vmN[n]); if (dN[n] > maxD) maxD = dN[n]; }
     }
     const s = Float32Array.from(used).sort(), p99 = s.length ? s[Math.min(s.length - 1, Math.floor(s.length * 0.99))] : 0;
-    return { u, vmN, dN, maxD, maxVm, p99 };
+    return { u, vmN, wN, dN, maxD, maxVm, p99 };
+  }
+  /* valeurs sur la vraie surface : P = points (xyz), N = normales sortantes ; interpole la contrainte et le déplacement */
+  function surfaceInterp(mesh, P, N, res) {
+    const np = P.length / 3, vm = new Float32Array(np), disp = new Float32Array(np * 3), { conn } = mesh, { u, vmN, wN } = res;
+    for (let p = 0; p < np; p++) {
+      const e = locate(mesh, P[p * 3], P[p * 3 + 1], P[p * 3 + 2], N[p * 3], N[p * 3 + 1], N[p * 3 + 2]); if (e < 0) continue;
+      let sw = 0, sv = 0, d0 = 0, d1 = 0, d2 = 0;
+      for (let c = 0; c < 8; c++) {
+        const w = (c & 1 ? LOC[0] : 1 - LOC[0]) * (c & 2 ? LOC[1] : 1 - LOC[1]) * (c & 4 ? LOC[2] : 1 - LOC[2]), nd = conn[e * 8 + c];
+        d0 += w * u[nd * 3]; d1 += w * u[nd * 3 + 1]; d2 += w * u[nd * 3 + 2];
+        const ww = w * Math.min(1, wN[nd]); sw += ww; sv += ww * vmN[nd];
+      }
+      vm[p] = sw > 1e-9 ? sv / sw : 0; disp[p * 3] = d0; disp[p * 3 + 1] = d1; disp[p * 3 + 2] = d2;
+    }
+    return { vm, disp };
   }
 
-  /* éléments du masque reliés par des faces aux éléments « graines » (retire les morceaux flottants) */
   function keepConnected(mesh, mask, seed) {
     const { nx, ny, nz, ne, elemOf, elemG } = mesh, sxy = nx * ny, out = new Uint8Array(ne), st = [];
     for (let e = 0; e < ne; e++) if (mask[e] && seed[e]) { out[e] = 1; st.push(e); }
@@ -636,25 +745,27 @@ const FEA = (function () {
      itération pour que le facteur de sécurité (Sy / von Mises max) rejoigne la valeur visée. */
   async function topopt(o) {
     const { mesh, Ke, E, fixed, f, passive, tick, onIter } = o, iters = o.iters || 30, fsMode = o.mode === 'fs';
-    const { ne, conn, nx, ny, nz, elemOf, elemG, h } = mesh, pen = 3, Emin = 1e-3, move = 0.2, sxy = nx * ny;
+    const { ne, conn, nx, ny, nz, elemOf, elemG, h, fill, cut, oct } = mesh, pen = 3, Emin = 1e-3, move = 0.2, sxy = nx * ny;
     const x = new Float64Array(ne), scale = new Float64Array(ne), dc = new Float64Array(ne), dcf = new Float64Array(ne), xn = new Float64Array(ne);
-    let np = 0; for (let e = 0; e < ne; e++) np += passive[e];
-    const vmin = Math.max(np + 1, 0.05 * ne);
-    let target = fsMode ? ne : Math.max(o.volfrac * ne, np + 1), fs = 0;
-    if (o.xInit) x.set(o.xInit); else for (let e = 0; e < ne; e++) x[e] = passive[e] ? 1 : target / ne;
-    const u = Float64Array.from(o.x0), ue = new Float64Array(24);
+    let np = 0, vtot = 0; for (let e = 0; e < ne; e++) { vtot += fill[e]; if (passive[e]) np += fill[e]; }
+    const vmin = Math.max(np * 1.02, 0.05 * vtot);
+    let target = fsMode ? vtot : Math.max(o.volfrac * vtot, np * 1.02), fs = 0;
+    if (o.xInit) x.set(o.xInit); else for (let e = 0; e < ne; e++) x[e] = passive[e] ? 1 : target / vtot;
+    const u = Float64Array.from(o.x0), ue = new Float64Array(24), fe = new Float64Array(24);
     for (let it = 1; it <= iters; it++) {
       for (let e = 0; e < ne; e++) scale[e] = E * h * (Emin + Math.pow(x[e], pen) * (1 - Emin));
-      const r = await pcg({ mesh, Ke, scale, fixed, x: u, f, tol: 1e-3, maxIter: 8000, mg: o.mg, tick: tick ? (i, res) => tick(it, i, res) : null });
+      const r = await pcg({ mesh, Ke, scale, fixed, x: u, f, nb: o.nb, tol: 1e-3, maxIter: 8000, mg: o.mg, tick: tick ? (i, res) => tick(it, i, res) : null });
       if (r.cancelled) return { x, cancelled: true, iter: it, fs };
       if (fsMode) {
         fs = o.Sy / Math.max(1e-12, computeResults(mesh, E, o.nu, u, x).maxVm);
-        target = Math.min(ne, Math.max(vmin, target * Math.min(1.04, Math.max(0.95, Math.sqrt(o.fsTarget / fs)))));
+        target = Math.min(vtot, Math.max(vmin, target * Math.min(1.04, Math.max(0.95, Math.sqrt(o.fsTarget / fs)))));
       }
       let comp = 0;
       for (let e = 0; e < ne; e++) {
         for (let a = 0; a < 8; a++) { const n = conn[e * 8 + a] * 3; ue[a * 3] = u[n]; ue[a * 3 + 1] = u[n + 1]; ue[a * 3 + 2] = u[n + 2]; }
-        let ce = 0; for (let i = 0; i < 24; i++) { let s = 0; for (let j = 0; j < 24; j++) s += Ke[i * 24 + j] * ue[j]; ce += ue[i] * s; }
+        let ce = 0;
+        if (cut[e]) { cutKu(Ke, oct, e, ue, fe); for (let i = 0; i < 24; i++) ce += ue[i] * fe[i]; }
+        else for (let i = 0; i < 24; i++) { let s = 0; for (let j = 0; j < 24; j++) s += Ke[i * 24 + j] * ue[j]; ce += ue[i] * s; }
         ce *= E * h; comp += (Emin + Math.pow(x[e], pen) * (1 - Emin)) * ce;
         dc[e] = -pen * x[e] * x[e] * (1 - Emin) * ce;
       }
@@ -667,7 +778,7 @@ const FEA = (function () {
           const q = elemOf[a + nx * (b + ny * c)]; if (q < 0) continue;
           sw += w; s += w * x[q] * dc[q];
         }
-        dcf[e] = s / (Math.max(1e-3, x[e]) * sw);
+        dcf[e] = s / (Math.max(1e-3, x[e]) * sw * Math.max(0.02, fill[e]));
       }
       let l1 = 0, l2 = 1e-30; for (let e = 0; e < ne; e++) if (-dcf[e] > l2) l2 = -dcf[e];
       l2 *= 1e4;
@@ -676,12 +787,12 @@ const FEA = (function () {
         for (let e = 0; e < ne; e++) {
           let v = passive[e] ? 1 : x[e] * Math.sqrt(Math.max(0, -dcf[e]) / lm);
           if (!passive[e]) v = Math.max(1e-3, Math.max(x[e] - move, Math.min(1, Math.min(x[e] + move, v))));
-          xn[e] = v; sum += v;
+          xn[e] = v; sum += v * fill[e];
         }
         if (sum > target) l1 = lm; else l2 = lm;
       }
       let ch = 0; for (let e = 0; e < ne; e++) { const d = Math.abs(xn[e] - x[e]); if (d > ch) ch = d; x[e] = xn[e]; }
-      if (onIter && (await onIter(it, x, comp, ch, fs, target / ne)) === false) return { x, cancelled: true, iter: it, fs };
+      if (onIter && (await onIter(it, x, comp, ch, fs, target / vtot)) === false) return { x, cancelled: true, iter: it, fs };
       if (fsMode ? (it > 15 && ch < 0.03 && Math.abs(fs / o.fsTarget - 1) < 0.03) : (ch < 0.01 && it > 10)) return { x, iter: it, fs };
     }
     return { x, iter: iters, fs };
@@ -717,7 +828,7 @@ const FEA = (function () {
     return { tris, holeL, holeR };
   }
 
-  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N };
+  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, surfaceLoad, surfaceInterp, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N };
 })();
 if (typeof module !== 'undefined') module.exports = FEA;
 </script>
@@ -788,7 +899,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
   }
   function sceneList() {
     const t = S.tab, b = R.bufs;
-    if (t === 'results' && b.res) return ['res', S.showEdges && 'resL'];
+    if (t === 'results' && b.res) return ['res'];
     if (t === 'opt' && b.opt) return ['opt', S.showEdges && 'optL'];
     if ((t === 'mesh' || t === 'results' || t === 'opt') && b.mesh) return ['mesh', S.showEdges && 'meshL'];
     return ['geo', 'geoL'];
@@ -896,7 +1007,8 @@ if (typeof module !== 'undefined') module.exports = FEA;
       geoColors();
     } else if (R.picks[R.pickName]) {
       const PK = R.picks[R.pickName], h = pickTri(PK.pos, r.o, r.d); let txt = '';
-      if (h && PK.val) {
+      if (h && PK.vals) { const i = h.idx * 3; txt = fmt((PK.vals[i] + PK.vals[i + 1] + PK.vals[i + 2]) / 3, 4) + ' ' + PK.unit; }
+      else if (h && PK.val) {
         const f = h.idx >> 1, q = PK.quads, P = [r.o[0] + r.d[0] * h.t, r.o[1] + r.d[1] * h.t, r.o[2] + r.d[2] * h.t]; let bd = Infinity, bn = -1;
         for (let k = 0; k < 4; k++) { const i = (f * 6 + [0, 1, 2, 5][k]) * 3, d = (PK.pos[i] - P[0]) ** 2 + (PK.pos[i + 1] - P[1]) ** 2 + (PK.pos[i + 2] - P[2]) ** 2; if (d < bd) { bd = d; bn = q[f * 4 + k]; } }
         txt = fmt(PK.val(bn), 4) + ' ' + PK.unit;
@@ -961,18 +1073,40 @@ if (typeof module !== 'undefined') module.exports = FEA;
     setBuf(name, { pos, nrm, col }); setBuf(name + 'L', { pos: lin, lines: true, color: [0.05, 0.07, 0.09] });
     return pos;
   }
-  function meshBuffers() { if (S.mesh) faceBuffers('mesh', S.mesh.faces, null, null, 0, [0.5, 0.62, 0.78]); }
+  function meshBuffers() {
+    const m = S.mesh; if (!m) return; const mask = new Uint8Array(m.ne); for (let e = 0; e < m.ne; e++) if (m.fill[e] >= 0.5) mask[e] = 1;
+    faceBuffers('mesh', FEA.extractFaces(m, mask), null, null, 0, [0.5, 0.62, 0.78]);
+  }
+  /* surface réelle (STL) redécoupée à la taille du maillage, pour y afficher les résultats */
+  function displayMesh() {
+    const m = S.mesh; if (S.dsp && S.dsp.mesh === m) return S.dsp;
+    const T = S.tris, nt = S.surf.nt, Nn = S.surf.normals, len = new Float32Array(nt);
+    for (let t = 0; t < nt; t++) { const i = t * 9; len[t] = Math.max(Math.hypot(T[i + 3] - T[i], T[i + 4] - T[i + 1], T[i + 5] - T[i + 2]), Math.hypot(T[i + 6] - T[i], T[i + 7] - T[i + 1], T[i + 8] - T[i + 2]), Math.hypot(T[i + 6] - T[i + 3], T[i + 7] - T[i + 4], T[i + 8] - T[i + 5])); }
+    let hd = m.h, cnt = 0; for (; ;) { cnt = 0; for (let t = 0; t < nt; t++) { const n = Math.min(64, Math.max(1, Math.ceil(len[t] / hd))); cnt += n * n; } if (cnt <= 700000) break; hd *= 1.3; }
+    const P = new Float32Array(cnt * 9), N = new Float32Array(cnt * 9); let o = 0;
+    const put = (i, n, a, b) => { const r = a / n, s = b / n; P[o] = T[i] + (T[i + 3] - T[i]) * r + (T[i + 6] - T[i]) * s; P[o + 1] = T[i + 1] + (T[i + 4] - T[i + 1]) * r + (T[i + 7] - T[i + 1]) * s; P[o + 2] = T[i + 2] + (T[i + 5] - T[i + 2]) * r + (T[i + 8] - T[i + 2]) * s; o += 3; };
+    for (let t = 0; t < nt; t++) {
+      const i = t * 9, n = Math.min(64, Math.max(1, Math.ceil(len[t] / hd))), o0 = o;
+      for (let a = 0; a < n; a++) for (let b = 0; b < n - a; b++) { put(i, n, a, b); put(i, n, a + 1, b); put(i, n, a, b + 1); if (b < n - a - 1) { put(i, n, a + 1, b); put(i, n, a + 1, b + 1); put(i, n, a, b + 1); } }
+      for (let q = o0; q < o; q += 3) { N[q] = Nn[t * 3]; N[q + 1] = Nn[t * 3 + 1]; N[q + 2] = Nn[t * 3 + 2]; }
+    }
+    return S.dsp = { mesh: m, P, N };
+  }
   function resRange() {
-    const r = S.res; if (S.resField === 'disp') return { lo: 0, hi: r.maxD || 1, unit: 'mm', title: 'Déplacement', rev: false, val: n => r.dN[n] };
-    if (S.resField === 'fs') return { lo: 0, hi: 2 * S.fsTarget, unit: '', title: 'Facteur de sécurité', rev: true, val: n => S.mat.Sy / Math.max(r.vmN[n], 1e-9) };
-    return { lo: 0, hi: r.maxVm || 1, unit: 'MPa', title: 'Contrainte de von Mises', rev: false, val: n => r.vmN[n] };
+    const r = S.res; if (S.resField === 'disp') return { lo: 0, hi: r.maxD || 1, unit: 'mm', title: 'Déplacement', rev: false, val: p => Math.hypot(r.sd[p * 3], r.sd[p * 3 + 1], r.sd[p * 3 + 2]) };
+    if (S.resField === 'fs') return { lo: 0, hi: 2 * S.fsTarget, unit: '', title: 'Facteur de sécurité', rev: true, val: p => S.mat.Sy / Math.max(r.sv[p], 1e-9) };
+    return { lo: 0, hi: r.maxVm || 1, unit: 'MPa', title: 'Contrainte de von Mises', rev: false, val: p => r.sv[p] };
   }
   function defScale() { const r = S.res; if (!S.showDef || !r || !r.maxD) return 0; return S.defMult * r.auto; }
   function resBuffers() {
-    const r = S.res; if (!r) { setBuf('res', null); setBuf('resL', null); R.picks.res = null; return; }
-    const g = resRange(), k = defScale();
-    const pos = faceBuffers('res', S.mesh.faces, n => { const t = (g.val(n) - g.lo) / (g.hi - g.lo); return g.rev ? 1 - t : t; }, r.u, k);
-    R.picks.res = { name: 'res', pos, quads: S.mesh.faces.quads, val: g.val, unit: g.unit };
+    const r = S.res; if (!r || !S.dsp || S.dsp.mesh !== S.mesh) { setBuf('res', null); R.picks.res = null; return; }
+    const g = resRange(), k = defScale(), P = S.dsp.P, np = P.length / 3, pos = new Float32Array(P.length), col = new Float32Array(P.length), vals = new Float32Array(np);
+    for (let p = 0; p < np; p++) {
+      pos[p * 3] = P[p * 3] + r.sd[p * 3] * k; pos[p * 3 + 1] = P[p * 3 + 1] + r.sd[p * 3 + 1] * k; pos[p * 3 + 2] = P[p * 3 + 2] + r.sd[p * 3 + 2] * k;
+      const v = vals[p] = g.val(p), t = (v - g.lo) / (g.hi - g.lo); cmap(g.rev ? 1 - t : t, col, p * 3);
+    }
+    setBuf('res', { pos, nrm: S.dsp.N, col });
+    R.picks.res = { pos, vals, unit: g.unit };
   }
   function optMask() {
     const x = S.opt.x, m = S.mesh; let mask = new Uint8Array(m.ne); for (let e = 0; e < m.ne; e++) if (x[e] > S.opt.thr) mask[e] = 1;
@@ -981,8 +1115,9 @@ if (typeof module !== 'undefined') module.exports = FEA;
   const verOk = () => { const v = S.opt.ver; return v && !v.fail && v.thr === S.opt.thr && v.mesh === S.mesh ? v : null; };
   function optBuffers() {
     const x = S.opt.x; if (!x || !S.mesh) { setBuf('opt', null); setBuf('optL', null); return; }
-    const mask = optMask(); let n = 0; for (let e = 0; e < mask.length; e++) n += mask[e];
-    S.opt.faces = FEA.extractFaces(S.mesh, mask); S.opt.kept = n;
+    const mask = optMask(); let n = 0; for (let e = 0; e < mask.length; e++) if (mask[e]) n += S.mesh.fill[e];
+    const shown = Uint8Array.from(mask, (v, e) => v && S.mesh.fill[e] >= 0.5 ? 1 : 0);
+    S.opt.faces = FEA.extractFaces(S.mesh, shown); S.opt.kept = n;
     const v = S.opt.colorVm && !S.busy ? verOk() : null;
     const pos = faceBuffers('opt', S.opt.faces, v ? nd => v.vmN[nd] / (v.maxVm || 1) : null, null, 0, [0.91, 0.52, 0.36]);
     R.picks.opt = v ? { pos, quads: S.opt.faces.quads, val: nd => v.vmN[nd], unit: 'MPa' } : null;
@@ -991,7 +1126,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
   /* ================= Modèle ================= */
   function toast(msg, info) { const t = $('#toast'); t.textContent = msg; t.className = 'on' + (info ? ' info' : ''); clearTimeout(toast.t); toast.t = setTimeout(() => t.className = '', info ? 2500 : 6000); }
   function invalidate(meshToo) {
-    if (meshToo) { S.mesh = null; setBuf('mesh', null); setBuf('meshL', null); }
+    if (meshToo) { S.mesh = null; S.dsp = null; setBuf('mesh', null); setBuf('meshL', null); }
     S.res = null; S.opt.x = null; S.opt.info = ''; S.opt.ver = null; S.opt.ctx = null; R.picks = {}; resBuffers(); optBuffers();
   }
   function applyUnit() {
@@ -1036,25 +1171,30 @@ if (typeof module !== 'undefined') module.exports = FEA;
     if (!S.bcs.some(b => b.type !== 'force')) { toast('Ajoutez au moins un appui : sans appui, la pièce est libre de bouger.'); S.tab = 'study'; ui(); return null; }
     if (!S.bcs.some(b => b.type === 'force' && Math.hypot(...b.v) > 0) && !S.bcs.some(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0))) { toast('Ajoutez au moins une force ou un déplacement imposé non nul.'); S.tab = 'study'; ui(); return null; }
     if (!S.mesh || S.mesh.h !== S.h) { if (!genMesh()) return null; }
-    const list = [];
+    const list = [], m = S.mesh, N = S.surf.normals;
     for (const b of S.bcs) {
-      const nodes = FEA.nodesNearTris(S.mesh, S.tris, b.tris, S.mesh.h);
+      if (b.type === 'force') {
+        const ld = FEA.surfaceLoad(m, S.tris, N, b.tris, b.v, !!b.bearing);
+        if (!ld.nodes.length) { toast('« ' + b.name + ' » ne touche pas le maillage. Affinez le maillage.'); return null; }
+        list.push({ type: 'force', nodes: ld.nodes, w: ld.w, v: b.v }); continue;
+      }
+      const nodes = FEA.nodesNearTris(m, S.tris, b.tris, 0.75 * m.h);
       if (!nodes.length) { toast('« ' + b.name + ' » ne touche aucun nœud du maillage. Affinez le maillage.'); return null; }
-      const normals = new Float32Array(nodes.length * 3), N = S.surf.normals;
+      const normals = new Float32Array(nodes.length * 3);
       for (let i = 0; i < nodes.length; i++) for (let c = 0; c < 3; c++) normals[i * 3 + c] = N[nodes.tri[i] * 3 + c];
-      list.push({ type: b.type, nodes, normals, bearing: !!b.bearing, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v });
+      list.push({ type: b.type, nodes, normals, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v });
     }
-    return { Ke: FEA.hexKe(S.mat.nu), list, pins: list.some(b => b.type === 'pin') };
+    return { nu: S.mat.nu, kpen: 4 * S.mat.E * m.h, list, pins: list.some(b => b.type === 'pin') };
   }
   /* ---------- exécution du moteur dans un fil séparé (Web Worker), avec repli sur le fil principal ---------- */
   const GLUE = `
 let mesh = null;
 onmessage = async e => {
   const m = e.data; if (m.t === 'mesh') { mesh = m.mesh; return; }
-  const a = m.args; a.mesh = mesh; let out;
+  const a = m.args; a.mesh = mesh; a.Ke = FEA.hexKe(a.nu); let out;
   try {
     a.tick = (...v) => { postMessage({ t: 'p', id: m.id, a: v }); };
-    if (m.fn === 'solveContact') { const r = await FEA.solveContact(a); out = { u: r.u, fixed: r.fixed, f: r.f, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
+    if (m.fn === 'solveContact') { const r = await FEA.solveContact(a); out = { u: r.u, fixed: r.fixed, f: r.f, nb: r.nb, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
     else if (m.fn === 'pcg') { const r = await FEA.pcg(a); out = { x: a.x, iter: r.iter, converged: r.converged }; }
     else { a.onIter = (it, x, comp, ch, fs, vf) => { postMessage({ t: 'i', id: m.id, a: [it, Float64Array.from(x), comp, ch, fs, vf] }); }; const r = await FEA.topopt(a); out = { x: r.x, iter: r.iter, fs: r.fs }; }
     postMessage({ t: 'r', id: m.id, out });
@@ -1063,7 +1203,7 @@ onmessage = async e => {
   const WK = { w: null, id: 0, cur: null, mesh: null }; window.__WK = WK;
   function killWorker() { if (WK.w) WK.w.terminate(); WK.w = null; WK.mesh = null; }
   async function runMain(fn, args, hooks) {
-    const a = Object.assign({}, args, { mesh: S.mesh });
+    const a = Object.assign({}, args, { mesh: S.mesh, Ke: FEA.hexKe(args.nu) });
     a.tick = async (...v) => { if (hooks.tick) hooks.tick(...v); await frame(); return !S.cancel; };
     if (fn === 'topopt') a.onIter = async (...v) => { if (hooks.iter) hooks.iter(...v); await frame(); return !S.cancel; };
     const r = await FEA[fn](a); if (fn === 'pcg') r.x = a.x; return r;
@@ -1095,11 +1235,12 @@ onmessage = async e => {
     if (S.busy) return; const p = prepare(); if (!p) return;
     S.busy = true; S.cancel = false; ui(); const m = S.mesh, t0 = performance.now();
     setProg(true, 'Résolution…', 0); await frame();
-    let r; try { r = await run('solveContact', { Ke: p.Ke, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-6, mg: true }, { tick: solveTick('Résolution') }); } catch (err) { return fail(err); }
+    let r; try { r = await run('solveContact', { nu: p.nu, kpen: p.kpen, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-6, mg: true }, { tick: solveTick('Résolution') }); } catch (err) { return fail(err); }
     setProg(false); S.busy = false;
     if (r.cancelled) { toast('Calcul arrêté.', true); ui(); return; }
     if (!r.converged) { toast('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.'); ui(); return; }
     S.res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.u);
+    const dm = displayMesh(), si = FEA.surfaceInterp(m, dm.P, dm.N, S.res); S.res.sv = si.vm; S.res.sd = si.disp;
     S.res.auto = S.res.maxD ? 0.05 * Math.hypot(...S.gi.size) / S.res.maxD : 0; S.res.iter = r.iter; S.res.rounds = p.pins ? r.rounds : 0; S.res.time = (performance.now() - t0) / 1000;
     S.stale = false; S.tab = 'results'; resBuffers(); ui();
   }
@@ -1107,8 +1248,8 @@ onmessage = async e => {
   async function verifyOpt(lab) {
     const c = S.opt.ctx, m = S.mesh; if (!c || c.mesh !== m || !S.opt.x) return null;
     const mask = optMask(), scale = new Float64Array(m.ne); let kept = 0;
-    for (let e = 0; e < m.ne; e++) if (mask[e]) { scale[e] = S.mat.E * m.h; kept++; }
-    const r = await run('pcg', { Ke: c.Ke, scale, fixed: c.fixed, x: Float64Array.from(c.u0), f: c.f, tol: 1e-5, maxIter: 3000, mg: true }, { tick: (it, res) => setProg(true, (lab || 'Vérification de la forme') + ' — itération ' + it, Math.min(1, Math.log10(1 / res) / 5)) });
+    for (let e = 0; e < m.ne; e++) if (mask[e]) { scale[e] = S.mat.E * m.h; kept += m.fill[e]; }
+    const r = await run('pcg', { nu: S.mat.nu, scale, fixed: c.fixed, nb: c.nb, x: Float64Array.from(c.u0), f: c.f, tol: 1e-5, maxIter: 3000, mg: true }, { tick: (it, res) => setProg(true, (lab || 'Vérification de la forme') + ' — itération ' + it, Math.min(1, Math.log10(1 / res) / 5)) });
     if (r.cancelled) return null;
     if (!r.converged) { S.opt.ver = { fail: true, thr: S.opt.thr, mesh: m }; return null; }
     const res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.x, mask);
@@ -1130,17 +1271,17 @@ onmessage = async e => {
     const done = msg => { setProg(false); S.busy = false; if (msg) toast(msg); optBuffers(); ui(); };
     try {
       /* 1. pièce pleine : zones de contact des axes et facteur de sécurité de départ */
-      const r0 = await run('solveContact', { Ke: p.Ke, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-5, mg: true }, { tick: solveTick('Analyse de la pièce pleine') });
+      const r0 = await run('solveContact', { nu: p.nu, kpen: p.kpen, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-5, mg: true }, { tick: solveTick('Analyse de la pièce pleine') });
       if (r0.cancelled) return done();
       if (!r0.converged) return done('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.');
       const fs0 = S.mat.Sy / FEA.computeResults(m, S.mat.E, S.mat.nu, r0.u).maxVm;
-      o.ctx = { mesh: m, fixed: r0.fixed, f: r0.f, passive, u0: r0.u, Ke: p.Ke, fs0 };
+      o.ctx = { mesh: m, fixed: r0.fixed, f: r0.f, nb: r0.nb, passive, u0: r0.u, fs0 };
       if (fsMode && fs0 < o.fs * 1.03) return done('La pièce pleine a déjà un facteur de sécurité de ' + fmt(fs0, 3) + ' : on ne peut pas atteindre ' + fmt(o.fs, 3) + ' en enlevant de la matière. Visez une valeur plus basse, ou renforcez la pièce.');
       /* 2. optimisation */
       const iters = Math.max(5, Math.min(300, o.iters | 0)); let total = 0, note = '', stopped = false;
       const pass = async (extra, n, lab) => {
         let last = 0;
-        const r = await run('topopt', Object.assign({ Ke: p.Ke, E: S.mat.E, nu: S.mat.nu, Sy: S.mat.Sy, fixed: r0.fixed, x0: r0.u, f: r0.f, passive, iters: n, mg: true }, extra), {
+        const r = await run('topopt', Object.assign({ E: S.mat.E, nu: S.mat.nu, Sy: S.mat.Sy, fixed: r0.fixed, nb: r0.nb, x0: r0.u, f: r0.f, passive, iters: n, mg: true }, extra), {
           tick: (it, i) => setProg(true, lab + ' — itération ' + it + ' / ' + n + ' · solveur ' + i, (it - 1) / n),
           iter: (it, x, comp, ch, fs, vf) => { last = it; o.x = x; optBuffers(); setProg(true, lab + ' — itération ' + it + ' / ' + n + (fs ? ' · FS estimé ' + fmt(fs, 3) + ' · matière ' + fmt(vf * 100, 3) + ' %' : ''), it / n); }
         });
@@ -1151,8 +1292,8 @@ onmessage = async e => {
       if (!stopped && o.x) {
         let v = await verifyOpt('Vérification de la forme');
         for (let k = 0; fsMode && k < 5 && !S.cancel && !stopped && (!v || v.fs < 0.97 * o.fs); k++) {
-          let sum = 0; for (const q of o.x) sum += q;
-          await pass({ mode: 'vol', xInit: o.x, volfrac: Math.min(1, sum / m.ne * 1.07) }, 6, 'Ajustement ' + (k + 1));
+          let sum = 0, tot = 0; for (let e = 0; e < m.ne; e++) { sum += o.x[e] * m.fill[e]; tot += m.fill[e]; }
+          await pass({ mode: 'vol', xInit: o.x, volfrac: Math.min(1, sum / tot * 1.07) }, 6, 'Ajustement ' + (k + 1));
           if (!stopped) v = await verifyOpt('Vérification de la forme');
         }
         if (fsMode && !S.cancel && v && v.fs < 0.97 * o.fs) note = ' · cible non atteinte';
@@ -1168,7 +1309,7 @@ onmessage = async e => {
   function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Float32Array(u.buffer); }
   function save() {
     if (!S.raw) { toast('Rien à enregistrer : chargez d\'abord une pièce.'); return; }
-    const o = { app: 'aef3d', version: 1, name: S.name, unit: S.unit, tris: b64(S.raw), matIdx: S.matIdx, mat: S.mat, h: S.h, fsTarget: S.fsTarget, forceUnit: S.forceUnit, selMode: S.selMode, selTol: S.selTol, opt: { mode: S.opt.mode, vf: S.opt.vf, fs: S.opt.fs, iters: S.opt.iters }, bcs: S.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing })) };
+    const o = { app: 'aef3d', version: 1, name: S.name, unit: S.unit, tris: b64(S.raw), matIdx: S.matIdx, mat: S.mat, h: S.h, fsTarget: S.fsTarget, forceUnit: S.forceUnit, selMode: S.selMode, selTol: S.selTol, opt: { mode: S.opt.mode, vf: S.opt.vf, fs: S.opt.fs, iters: S.opt.iters }, bcs: S.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick })) };
     download(S.name.replace(/\.[^.]+$/, '') + '.aef.json', JSON.stringify(o), 'application/json');
   }
   function openFile(file) {
@@ -1226,13 +1367,13 @@ onmessage = async e => {
   function panelMesh() {
     if (!S.tris) return `<div class="sec">MAILLAGE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
     const est = S.gi.volume / S.h ** 3, mn = Math.min(...S.gi.size);
-    let h = `<div class="sec">MAILLAGE <span class="tag">VOXELS</span></div><div class="card"><div class="row"><span>Taille d'élément (mm)</span>${num('h', S.h)}</div>
+    let h = `<div class="sec">MAILLAGE <span class="tag">SURFACE RÉELLE</span></div><div class="card"><div class="row"><span>Taille d'élément (mm)</span>${num('h', S.h)}</div>
     <div class="row"><span>Éléments estimés</span><span class="val">≈ ${fmt(est, 2)}</span></div><div class="row"><span>Éléments dans la plus petite dimension</span><span class="val">${fmt(mn / S.h, 2)}</span></div></div>
     <div class="btns"><button class="btn" data-act="hfine">Plus fin</button><button class="btn" data-act="hcoarse">Plus grossier</button></div>
     <button class="btn primary wide" data-act="mesh">Générer le maillage</button>
-    <div class="mut small" style="margin-top:10px">Visez au moins 3 à 4 éléments dans l'épaisseur des zones chargées. Le calcul tourne en arrière-plan : comptez quelques secondes jusqu'à 50 000 éléments, de l'ordre d'une minute vers 300 000.</div>`;
+    <div class="mut small" style="margin-top:10px">La grille reste cubique, mais les éléments de bordure sont coupés par la vraie surface de la pièce : alésages et congés sont pris en compte tels que dessinés. Visez au moins 4 éléments dans l'épaisseur des zones chargées. Le calcul tourne en arrière-plan : comptez quelques secondes jusqu'à 50 000 éléments, de l'ordre d'une minute vers 300 000.</div>`;
     if (S.mesh) h += `<div class="sec">MAILLAGE ACTUEL</div><div class="card"><div class="row"><span>Éléments</span><span class="val">${fmt(S.mesh.ne, 7)}</span></div><div class="row"><span>Nœuds</span><span class="val">${fmt(S.mesh.nn, 7)}</span></div>
-    <div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(S.mesh.ne * S.mesh.h ** 3 / S.gi.volume * 100, 4)} %</span></div></div>${S.mesh.h !== S.h ? '<div class="chk"><i class="wn"></i><span>La taille a changé : régénérez le maillage.</span></div>' : ''}`;
+    <div class="row"><span>dont coupés par la surface</span><span class="val">${fmt(S.mesh.ncut, 7)}</span></div><div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(S.mesh.vol / S.gi.volume * 100, 4)} %</span></div></div>${S.mesh.h !== S.h ? '<div class="chk"><i class="wn"></i><span>La taille a changé : régénérez le maillage.</span></div>' : ''}`;
     return h;
   }
   function chips(types) {
@@ -1253,7 +1394,7 @@ onmessage = async e => {
           <div class="mut small">${b.bearing ? 'L\'axe ne fait que pousser : la force est appliquée seulement sur le côté de l\'alésage vers lequel elle pointe, plus fortement au centre de la zone d\'appui.' : 'Force totale, répartie uniformément sur les faces choisies (comme si elles étaient collées à ce qui les charge).'}</div>`;
       } else if (b.type === 'disp') {
         h += ['X', 'Y', 'Z'].map((a, i) => `<div class="row"><span><input type="checkbox" data-set="bc.fix${i}" ${b.free[i] ? '' : 'checked'}> Imposer ${a} (mm)</span>${num('bc.d' + i, b.v[i], 'any', b.free[i] ? 'disabled' : '')}</div>`).join('') + `<div class="mut small">Décochez un axe pour le laisser libre.</div>`;
-      } else if (b.type === 'pin') h += `<div class="mut small" style="margin-top:8px">Axe ou boulon rigide dans un alésage : il retient la pièce seulement là où elle vient s'appuyer contre lui. Le côté qui s'en écarte est laissé libre ; la zone de contact est trouvée automatiquement pendant le calcul (quelques passes).</div>`;
+      } else if (b.type === 'pin') h += `<div class="row"><span><input type="checkbox" data-set="bc.stick" ${b.stick ? 'checked' : ''}> Boulon serré (sans glissement)</span></div><div class="mut small">Axe ou boulon rigide dans un alésage : il retient la pièce seulement là où elle vient s'appuyer contre lui ; le côté qui s'en écarte est laissé libre. ${b.stick ? 'La matière en appui est tenue dans toutes les directions.' : 'La matière peut glisser autour de l\'axe, comme sur une articulation.'} La zone de contact est trouvée automatiquement (quelques passes de calcul).</div>`;
       else h += `<div class="mut small" style="margin-top:8px">Les faces choisies sont bloquées dans les trois directions, comme si elles étaient soudées à un bâti rigide.</div>`;
       h += `<div class="btns"><button class="btn" data-act="bcsel">Reprendre ses faces en sélection</button><button class="btn danger" data-act="bcdel">Supprimer</button></div></div>`;
     } else h += `<div class="mut small" style="margin-top:12px">Cliquez une ou plusieurs faces dans la vue, puis créez un appui ou une charge avec les boutons du panneau de droite. Cliquez une étiquette ci-dessus pour la modifier.</div>`;
@@ -1277,7 +1418,7 @@ onmessage = async e => {
     <div class="sec">AFFICHAGE</div><div class="seg full"><button data-res="vm" class="${S.resField === 'vm' ? 'on' : ''}">von Mises</button><button data-res="disp" class="${S.resField === 'disp' ? 'on' : ''}">Déplacement</button><button data-res="fs" class="${S.resField === 'fs' ? 'on' : ''}">Sécurité</button></div>
     <div class="row" style="margin-top:12px"><span><input type="checkbox" data-set="showDef" ${S.showDef ? 'checked' : ''}> Afficher la déformée</span></div>
     <div class="row"><span>Amplification (× auto)</span>${num('defMult', S.defMult, 0.5)}</div>
-    <div class="sec">À SAVOIR</div><div class="mut small">Le maillage en voxels crée des marches sur les surfaces courbes : la valeur maximale peut y être surestimée localement, ainsi qu'au bord des appuis. Comparez-la au 99ᵉ centile et affinez le maillage pour confirmer : si le maximum monte sans cesse en affinant, c'est un pic numérique.<br><br>${fmt(S.mesh.ne, 7)} éléments · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
+    <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.<br><br>${fmt(S.mesh.ne, 7)} éléments · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
   }
   function panelOpt() {
     if (!S.tris) return `<div class="sec">OPTIMISATION TOPOLOGIQUE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
@@ -1294,7 +1435,7 @@ onmessage = async e => {
       const cls = v ? (v.fs >= (fsM ? 0.97 * o.fs : S.fsTarget) ? 'ok' : v.fs >= 1 ? 'wn' : 'no') : '';
       h += `<div class="sec">RÉSULTAT</div>${v ? `<div class="verdict ${cls}">FS vérifié = ${fmt(v.fs, 3)}<small>${fsM ? 'Cible : ' + fmt(o.fs, 3) : 'Facteur visé dans Résultats : ' + fmt(S.fsTarget, 3)} · pièce pleine : ${c ? fmt(c.fs0, 3) : '—'}</small></div>` : ''}
       <div class="card"><div class="row"><span>État</span><span class="val">${esc(o.info || 'En cours…')}</span></div>
-      <div class="row"><span>Matière conservée</span><span class="val">${fmt(kept / S.mesh.ne * 100, 3)} %</span></div><div class="row"><span>Masse</span><span class="val">${fmt(kept * S.mesh.h ** 3 * S.mat.rho * 1e-9, 3)} kg</span></div>
+      <div class="row"><span>Matière conservée</span><span class="val">${fmt(kept * S.mesh.h ** 3 / S.mesh.vol * 100, 3)} %</span></div><div class="row"><span>Masse</span><span class="val">${fmt(kept * S.mesh.h ** 3 * S.mat.rho * 1e-9, 3)} kg</span></div>
       ${v ? `<div class="row"><span>von Mises maximale</span><span class="val">${fmt(v.maxVm, 4)} MPa</span></div><div class="row"><span>von Mises, 99ᵉ centile</span><span class="val">${fmt(v.p99, 4)} MPa</span></div><div class="row"><span>Déplacement maximal</span><span class="val">${fmt(v.maxD, 4)} mm</span></div>
       <div class="row"><span><input type="checkbox" data-set="opt.colorVm" ${o.colorVm ? 'checked' : ''}> Colorer selon la contrainte</span></div>` : ''}
       <label class="f">Seuil de densité affiché : ${fmt(o.thr, 2)}</label><input type="range" min="0.05" max="0.95" step="0.05" value="${o.thr}" data-set="opt.thr"></div>
@@ -1322,7 +1463,7 @@ onmessage = async e => {
       <div class="ln"><i style="background:#eb503c"></i>Déformée × ${fmt(defScale(), 3)}</div><div class="mut" style="margin-top:6px">${S.probe ? 'Au point visé : <b style="color:#fff">' + S.probe + '</b>' : 'Survolez la pièce pour lire la valeur.'}</div>`;
     } else if (S.tab === 'opt' && S.opt.x && S.opt.colorVm && !S.busy && verOk()) h = `<div class="t">Forme optimisée · von Mises <span>(MPa)</span></div><div class="bar"></div><div class="mm"><span>0</span><span>${fmt(verOk().maxVm, 3)}</span></div><div class="mut" style="margin-top:6px">${S.probe ? 'Au point visé : <b style="color:#fff">' + S.probe + '</b>' : 'Survolez la pièce pour lire la valeur.'}</div>`;
     else if (S.tab === 'opt' && S.opt.x) h = `<div class="t">Forme optimisée</div><div class="ln"><i style="background:#e8855c"></i>Matière conservée (densité > ${fmt(S.opt.thr, 2)})</div>`;
-    else if ((S.tab === 'mesh' || S.tab === 'results' || S.tab === 'opt') && S.mesh) h = `<div class="t">Maillage <span>(voxels de ${fmt(S.mesh.h)} mm)</span></div><div class="ln"><i style="background:#809ec7"></i>${fmt(S.mesh.ne, 7)} éléments</div>`;
+    else if ((S.tab === 'mesh' || S.tab === 'results' || S.tab === 'opt') && S.mesh) h = `<div class="t">Maillage <span>(éléments de ${fmt(S.mesh.h)} mm)</span></div><div class="ln"><i style="background:#809ec7"></i>${fmt(S.mesh.ne, 7)} éléments</div>`;
     else if (S.tris) h = `<div class="t">Géométrie</div><div class="ln"><i style="background:#e8734f"></i>Sélection</div><div class="ln"><i style="background:${hex(BCC.fix)}"></i>Appui fixe</div><div class="ln"><i style="background:${hex(BCC.pin)}"></i>Axe / boulon</div><div class="ln"><i style="background:${hex(BCC.disp)}"></i>Déplacement imposé</div><div class="ln"><i style="background:${hex(BCC.force)}"></i>Force</div>`;
     L.innerHTML = h; L.style.display = h ? '' : 'none';
   }
@@ -1365,7 +1506,7 @@ onmessage = async e => {
     const b = S.bcs.find(x => x.id === S.activeBC);
     if (p.startsWith('bc.')) {
       if (!b) return; const k = p.slice(3);
-      if (k === 'name') b.name = v || b.name; else if (k[0] === 'f' && k.length === 2) b.v[+k[1]] = v * fU(); else if (k[0] === 'd') b.v[+k[1]] = v; else if (k.startsWith('fix')) b.free[+k[3]] = !v; else if (k === 'bearing') b.bearing = v;
+      if (k === 'name') b.name = v || b.name; else if (k[0] === 'f' && k.length === 2) b.v[+k[1]] = v * fU(); else if (k[0] === 'd') b.v[+k[1]] = v; else if (k.startsWith('fix')) b.free[+k[3]] = !v; else if (k === 'bearing') b.bearing = v; else if (k === 'stick') b.stick = v;
       if (k !== 'name') S.stale = !!S.res;
     } else if (p === 'unit') { S.unit = v; applyUnit(); S.h = defaultH(); }
     else if (p === 'matIdx') { S.matIdx = v; S.mat = Object.assign({}, MATS[v]); S.stale = !!S.res; }
@@ -1386,8 +1527,8 @@ onmessage = async e => {
     $('#modal').innerHTML = `<div class="box"><h2>Analyse éléments finis 3D — aide</h2>
     <h3>Déroulement</h3><ol><li><b>Modèle</b> : importez le STL de la pièce, vérifiez les dimensions et choisissez le matériau.</li><li><b>Maillage</b> : réglez la taille d'élément et générez le maillage.</li><li><b>Étude</b> : cliquez les faces dans la vue, puis créez les appuis et les forces (panneau de droite).</li><li><b>Calculer</b>, puis lisez le bilan dans <b>Résultats</b>.</li><li><b>Optimisation</b> (facultatif) : cherchez la matière inutile sous le même cas de charge, en visant une quantité de matière ou un facteur de sécurité.</li></ol>
     <h3>Exporter depuis SolidWorks</h3><p>Fichier › Enregistrer sous › STL (*.stl). Dans Options : unité « Millimètres », résolution « Fine ». Une résolution fine donne des alésages plus ronds et des sélections de faces plus propres.</p>
-    <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>La pièce est découpée en petits cubes (voxels) ; plus ils sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide, sans jeu, et la zone en contact ne glisse pas.</li></ul>
-    <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis et sur les marches du maillage sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
+    <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>La pièce est découpée en petits cubes ; ceux qui touchent la surface sont coupés selon la vraie géométrie. Plus ils sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide et sans jeu, et la matière glisse autour de lui (ou non, avec l'option « Boulon serré »).</li></ul>
+    <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis fixes et dans les angles rentrants vifs sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
     <h3>Souris</h3><p>Clic gauche : tourner · clic droit : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p>
     <div class="btns" style="justify-content:flex-end"><button class="btn primary" data-act="closemodal">Fermer</button></div></div>`;
     $('#modal').classList.add('on');
