@@ -132,7 +132,7 @@ kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;border:1px solid 
 <input type="file" id="file" accept=".stl,.json" hidden>
 <div id="modal"></div><div id="toast"></div>
 
-<script>
+<script id="engine">
 'use strict';
 /* Moteur de calcul : STL, topologie de surface, voxelisation, éléments hexaédriques,
    solveur gradient conjugué sans matrice, contraintes, optimisation topologique (SIMP). */
@@ -368,12 +368,93 @@ const FEA = (function () {
     }
   }
 
-  /* Gradient conjugué préconditionné (Jacobi). x contient les déplacements imposés (et un départ à chaud). */
+  /* ---------- Multigrille géométrique (préconditionneur) ----------
+     Niveaux obtenus en regroupant les voxels 2×2×2 ; rigidité grossière = moyenne des enfants ;
+     interpolation trilinéaire ; lissage de Tchebychev (symétrique, donc utilisable dans le gradient conjugué). */
+  let KE_MU = null, KE_REF = null; const P = { deg: 2, al: 8 };
+  function keMu(Ke) { /* borne de λmax(D⁻¹A) : plus grande valeur propre de diag(Ke)⁻¹·Ke */
+    if (KE_REF === Ke) return KE_MU;
+    let v = new Float64Array(24), w = new Float64Array(24), lam = 1; for (let i = 0; i < 24; i++) v[i] = Math.sin(i * 1.7 + 0.3);
+    for (let it = 0; it < 300; it++) {
+      let nrm = 0; for (let i = 0; i < 24; i++) { let s = 0; for (let j = 0; j < 24; j++) s += Ke[i * 24 + j] * v[j]; w[i] = s / Ke[i * 25]; nrm += w[i] * w[i]; }
+      lam = Math.sqrt(nrm); let n0 = 0; for (let i = 0; i < 24; i++) n0 += v[i] * v[i]; lam /= Math.sqrt(n0); for (let i = 0; i < 24; i++) v[i] = w[i] / Math.sqrt(nrm);
+    }
+    KE_REF = Ke; return (KE_MU = lam * 1.02);
+  }
+  function coarsen(f) {
+    const nx = Math.ceil(f.nx / 2), ny = Math.ceil(f.ny / 2), nz = Math.ceil(f.nz / 2), mx = nx + 1, my = ny + 1;
+    const acc = new Float64Array(nx * ny * nz), has = new Uint8Array(nx * ny * nz), fsxy = f.nx * f.ny;
+    for (let e = 0; e < f.ne; e++) { const g = f.elemG[e], G = ((g % f.nx) >> 1) + nx * (((((g / f.nx) | 0) % f.ny) >> 1) + ny * (((g / fsxy) | 0) >> 1)); acc[G] += f.scale[e]; has[G] = 1; }
+    let ne = 0; for (let g = 0; g < has.length; g++) ne += has[g];
+    const nodeMap = new Int32Array(mx * my * (nz + 1)).fill(-1), conn = new Int32Array(ne * 8), elemG = new Int32Array(ne), scale = new Float64Array(ne); let e = 0, nn = 0;
+    for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const g = i + nx * (j + ny * k); if (!has[g]) continue; elemG[e] = g; scale[e] = acc[g] / 4;
+      for (let l = 0; l < 8; l++) { const gn = (i + (l & 1)) + mx * ((j + ((l >> 1) & 1)) + my * (k + ((l >> 2) & 1))); if (nodeMap[gn] < 0) nodeMap[gn] = nn++; conn[e * 8 + l] = nodeMap[gn]; }
+      e++;
+    }
+    /* table d'interpolation : pour chaque nœud fin, jusqu'à 8 nœuds grossiers et leurs poids */
+    const pc = new Int32Array(f.nn * 8).fill(-1), pw = new Float32Array(f.nn * 8), fixed = new Uint8Array(nn * 3), fmx = f.nx + 1, fmy = f.ny + 1;
+    for (let k = 0; k <= f.nz; k++) for (let j = 0; j <= f.ny; j++) for (let i = 0; i <= f.nx; i++) {
+      const id = f.nodeMap[i + fmx * (j + fmy * k)]; if (id < 0) continue; let m = 0;
+      const ni = i & 1 ? 2 : 1, nj = j & 1 ? 2 : 1, nk = k & 1 ? 2 : 1, w = 1 / (ni * nj * nk);
+      for (let c = 0; c < nk; c++) for (let b = 0; b < nj; b++) for (let a = 0; a < ni; a++) {
+        const cn = nodeMap[((i >> 1) + a) + mx * (((j >> 1) + b) + my * ((k >> 1) + c))]; if (cn < 0) continue;
+        pc[id * 8 + m] = cn; pw[id * 8 + m] = w; m++;
+        for (let d = 0; d < 3; d++) if (f.fixed[id * 3 + d]) fixed[cn * 3 + d] = 1;
+      }
+    }
+    f.pc = pc; f.pw = pw;
+    return { nx, ny, nz, ne, nn, conn, nodeMap, elemG, scale, fixed };
+  }
+  function mgSetup(mesh, Ke, scale, fixed) {
+    const L = [{ nx: mesh.nx, ny: mesh.ny, nz: mesh.nz, ne: mesh.ne, nn: mesh.nn, conn: mesh.conn, nodeMap: mesh.nodeMap, elemG: mesh.elemG, scale, fixed }];
+    while (L.length < 9) { const f = L[L.length - 1]; if (f.ne <= 40 || Math.max(f.nx, f.ny, f.nz) <= 2) break; L.push(coarsen(f)); }
+    for (const l of L) {
+      const n = l.nn * 3, D = new Float64Array(n);
+      for (let e = 0; e < l.ne; e++) for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) D[l.conn[e * 8 + a] * 3 + c] += l.scale[e] * Ke[(a * 3 + c) * 25];
+      for (let i = 0; i < n; i++) D[i] = l.fixed[i] || !(D[i] > 0) ? 0 : 1 / D[i];
+      l.iD = D; l.r = new Float64Array(n); l.d = new Float64Array(n); l.q = new Float64Array(n); l.b = new Float64Array(n); l.x = new Float64Array(n);
+    }
+    return { L, Ke, mu: keMu(Ke) };
+  }
+  function cheb(mg, l, b, x, fromZero, deg, alpha, needRes) {
+    const { iD, r, d, q, fixed } = l, n = iD.length, lmax = mg.mu, lmin = lmax / alpha, th = (lmax + lmin) / 2, de = (lmax - lmin) / 2, sg = th / de; let rho = 1 / sg;
+    if (fromZero) { for (let i = 0; i < n; i++) { x[i] = 0; r[i] = fixed[i] ? 0 : b[i]; } }
+    else { matvec(l, mg.Ke, l.scale, x, q); for (let i = 0; i < n; i++) r[i] = fixed[i] ? 0 : b[i] - q[i]; }
+    for (let i = 0; i < n; i++) d[i] = iD[i] * r[i] / th;
+    for (let k = 0; k < deg; k++) {
+      for (let i = 0; i < n; i++) x[i] += d[i];
+      if (k === deg - 1 && !needRes) break;
+      matvec(l, mg.Ke, l.scale, d, q); const rn = 1 / (2 * sg - rho), c1 = rn * rho, c2 = 2 * rn / de;
+      for (let i = 0; i < n; i++) { if (!fixed[i]) r[i] -= q[i]; d[i] = c1 * d[i] + c2 * iD[i] * r[i]; }
+      rho = rn;
+    }
+  }
+  function vcycle(mg, li, b, x) {
+    const L = mg.L, l = L[li];
+    if (li === L.length - 1) { cheb(mg, l, b, x, true, 14, 60, false); return; }
+    cheb(mg, l, b, x, true, P.deg, P.al, true);
+    const c = L[li + 1], cb = c.b, cx = c.x, pc = l.pc, pw = l.pw, r = l.r, nn = l.nn; cb.fill(0);
+    for (let f = 0; f < nn; f++) for (let m = f * 8, e = m + 8; m < e; m++) { const cn = pc[m]; if (cn < 0) break; const w = pw[m]; cb[cn * 3] += w * r[f * 3]; cb[cn * 3 + 1] += w * r[f * 3 + 1]; cb[cn * 3 + 2] += w * r[f * 3 + 2]; }
+    vcycle(mg, li + 1, cb, cx);
+    const fx = l.fixed;
+    for (let f = 0; f < nn; f++) {
+      let a0 = 0, a1 = 0, a2 = 0;
+      for (let m = f * 8, e = m + 8; m < e; m++) { const cn = pc[m]; if (cn < 0) break; const w = pw[m]; a0 += w * cx[cn * 3]; a1 += w * cx[cn * 3 + 1]; a2 += w * cx[cn * 3 + 2]; }
+      if (!fx[f * 3]) x[f * 3] += a0; if (!fx[f * 3 + 1]) x[f * 3 + 1] += a1; if (!fx[f * 3 + 2]) x[f * 3 + 2] += a2;
+    }
+    cheb(mg, l, b, x, false, P.deg, P.al, false);
+  }
+
+  /* Gradient conjugué préconditionné. x contient les déplacements imposés (et un départ à chaud).
+     o.mg = true : préconditionneur multigrille ; sinon Jacobi. */
   async function pcg(o) {
     const { mesh, Ke, scale, fixed, x, f } = o, tol = o.tol || 1e-6, maxIter = o.maxIter || 20000, tick = o.tick;
-    const n = mesh.nn * 3, r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), q = new Float64Array(n), M = new Float64Array(n);
-    const { ne, conn } = mesh;
-    for (let e = 0; e < ne; e++) for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) M[conn[e * 8 + a] * 3 + c] += scale[e] * Ke[(a * 3 + c) * 25];
+    const n = mesh.nn * 3, r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), q = new Float64Array(n);
+    const { ne, conn } = mesh; let M = null, mg = null;
+    if (o.mg && ne > 400) mg = mgSetup(mesh, Ke, scale, fixed);
+    else { M = new Float64Array(n); for (let e = 0; e < ne; e++) for (let a = 0; a < 8; a++) for (let c = 0; c < 3; c++) M[conn[e * 8 + a] * 3 + c] += scale[e] * Ke[(a * 3 + c) * 25]; for (let i = 0; i < n; i++) M[i] = M[i] > 0 ? 1 / M[i] : 0; }
+    const prec = mg ? () => vcycle(mg, 0, r, z) : () => { for (let i = 0; i < n; i++) z[i] = r[i] * M[i]; };
     for (let i = 0; i < n; i++) p[i] = fixed[i] ? x[i] : 0;
     matvec(mesh, Ke, scale, p, q);
     let bn = 0; for (let i = 0; i < n; i++) if (!fixed[i]) { const b = f[i] - q[i]; bn += b * b; }
@@ -381,19 +462,22 @@ const FEA = (function () {
     if (bn === 0) { for (let i = 0; i < n; i++) if (!fixed[i]) x[i] = 0; return { iter: 0, res: 0, converged: true }; }
     matvec(mesh, Ke, scale, x, q);
     let rz = 0, rr = 0;
-    for (let i = 0; i < n; i++) { r[i] = fixed[i] ? 0 : f[i] - q[i]; z[i] = M[i] > 0 ? r[i] / M[i] : 0; p[i] = z[i]; rz += r[i] * z[i]; rr += r[i] * r[i]; }
+    for (let i = 0; i < n; i++) { r[i] = fixed[i] ? 0 : f[i] - q[i]; rr += r[i] * r[i]; }
+    prec(); for (let i = 0; i < n; i++) { p[i] = z[i]; rz += r[i] * z[i]; }
     let res = Math.sqrt(rr) / bn, it = 0, last = Date.now();
     while (res > tol && it < maxIter) {
       matvec(mesh, Ke, scale, p, q);
       let pq = 0; for (let i = 0; i < n; i++) { if (fixed[i]) q[i] = 0; pq += p[i] * q[i]; }
       if (!(pq > 0)) return { iter: it, res, converged: false };
-      const al = rz / pq; let rz2 = 0; rr = 0;
-      for (let i = 0; i < n; i++) { x[i] += al * p[i]; r[i] -= al * q[i]; z[i] = M[i] > 0 ? r[i] / M[i] : 0; rz2 += r[i] * z[i]; rr += r[i] * r[i]; }
-      const be = rz2 / rz; rz = rz2;
-      for (let i = 0; i < n; i++) p[i] = z[i] + be * p[i];
+      const al = rz / pq; rr = 0;
+      for (let i = 0; i < n; i++) { x[i] += al * p[i]; r[i] -= al * q[i]; rr += r[i] * r[i]; }
       res = Math.sqrt(rr) / bn; it++;
       if (!isFinite(res)) return { iter: it, res, converged: false };
-      if (tick && (it & 3) === 0 && Date.now() - last > 120) { last = Date.now(); if ((await tick(it, res)) === false) return { iter: it, res, converged: false, cancelled: true }; }
+      if (res <= tol) break;
+      prec(); let rz2 = 0; for (let i = 0; i < n; i++) rz2 += r[i] * z[i];
+      const be = rz2 / rz; rz = rz2;
+      for (let i = 0; i < n; i++) p[i] = z[i] + be * p[i];
+      if (tick && (mg || (it & 3) === 0) && Date.now() - last > 120) { last = Date.now(); if ((await tick(it, res)) === false) return { iter: it, res, converged: false, cancelled: true }; }
     }
     return { iter: it, res, converged: res <= tol };
   }
@@ -481,7 +565,7 @@ const FEA = (function () {
       round++; bc = buildBC(mesh, bcs);
       if (u) for (let i = 0; i < n; i++) if (!bc.fixed[i]) bc.x[i] = u[i];
       /* passes intermédiaires à tolérance relâchée, dernière passe à pleine précision */
-      r = await pcg({ mesh, Ke, scale, fixed: bc.fixed, x: bc.x, f: bc.f, tol: last ? tol : Math.max(tol, 1e-3), maxIter: o.maxIter, tick: o.tick ? (it, res) => o.tick(it, res, round) : null });
+      r = await pcg({ mesh, Ke, scale, fixed: bc.fixed, x: bc.x, f: bc.f, tol: last ? tol : Math.max(tol, 1e-3), maxIter: o.maxIter, mg: o.mg, tick: o.tick ? (it, res) => o.tick(it, res, round) : null });
       u = bc.x; if (!r.converged || last) break;
       matvec(mesh, Ke, scale, u, q); let rmax = 0, changed = 0;
       for (const b of pins) for (let i = 0; i < b.nodes.length; i++) if (b.active[i]) { const nd = b.nodes[i] * 3; rmax = Math.max(rmax, Math.hypot(q[nd] - bc.f[nd], q[nd + 1] - bc.f[nd + 1], q[nd + 2] - bc.f[nd + 2])); }
@@ -561,7 +645,7 @@ const FEA = (function () {
     const u = Float64Array.from(o.x0), ue = new Float64Array(24);
     for (let it = 1; it <= iters; it++) {
       for (let e = 0; e < ne; e++) scale[e] = E * h * (Emin + Math.pow(x[e], pen) * (1 - Emin));
-      const r = await pcg({ mesh, Ke, scale, fixed, x: u, f, tol: 1e-3, maxIter: 8000, tick: tick ? (i, res) => tick(it, i, res) : null });
+      const r = await pcg({ mesh, Ke, scale, fixed, x: u, f, tol: 1e-3, maxIter: 8000, mg: o.mg, tick: tick ? (i, res) => tick(it, i, res) : null });
       if (r.cancelled) return { x, cancelled: true, iter: it, fs };
       if (fsMode) {
         fs = o.Sy / Math.max(1e-12, computeResults(mesh, E, o.nu, u, x).maxVm);
@@ -633,7 +717,7 @@ const FEA = (function () {
     return { tris, holeL, holeR };
   }
 
-  return { parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N };
+  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N };
 })();
 if (typeof module !== 'undefined') module.exports = FEA;
 </script>
@@ -940,7 +1024,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     if (!S.tris) { toast('Chargez d\'abord une pièce.'); return false; }
     if (!(S.h > 0)) { toast('Taille d\'élément invalide.'); return false; }
     const est = S.gi.volume / S.h ** 3, cells = S.gi.size[0] * S.gi.size[1] * S.gi.size[2] / S.h ** 3;
-    if (est > 600000 || cells > 4e7) { toast('Maillage trop fin pour le navigateur (≈ ' + fmt(est) + ' éléments). Augmentez la taille d\'élément.'); return false; }
+    if (est > 1500000 || cells > 6e7) { toast('Maillage trop fin pour le navigateur (≈ ' + fmt(est) + ' éléments). Augmentez la taille d\'élément.'); return false; }
     const vox = FEA.voxelize(S.tris, S.h);
     if (!vox.count) { toast('Aucun élément créé : la taille d\'élément est trop grande pour cette pièce, ou le STL n\'est pas un volume fermé.'); return false; }
     S.mesh = FEA.buildMesh(vox); S.res = null; S.opt.x = null; S.opt.ver = null; S.opt.ctx = null; resBuffers(); optBuffers(); meshBuffers(); return true;
@@ -962,13 +1046,56 @@ if (typeof module !== 'undefined') module.exports = FEA;
     }
     return { Ke: FEA.hexKe(S.mat.nu), list, pins: list.some(b => b.type === 'pin') };
   }
-  const solveTick = lab => async (it, res, round) => { setProg(true, lab + (round > 1 ? ' — contact, passe ' + round : '') + ' — itération ' + it + ' · résidu ' + res.toExponential(1), Math.min(1, Math.log10(1 / res) / 6)); await frame(); return !S.cancel; };
+  /* ---------- exécution du moteur dans un fil séparé (Web Worker), avec repli sur le fil principal ---------- */
+  const GLUE = `
+let mesh = null;
+onmessage = async e => {
+  const m = e.data; if (m.t === 'mesh') { mesh = m.mesh; return; }
+  const a = m.args; a.mesh = mesh; let out;
+  try {
+    a.tick = (...v) => { postMessage({ t: 'p', id: m.id, a: v }); };
+    if (m.fn === 'solveContact') { const r = await FEA.solveContact(a); out = { u: r.u, fixed: r.fixed, f: r.f, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
+    else if (m.fn === 'pcg') { const r = await FEA.pcg(a); out = { x: a.x, iter: r.iter, converged: r.converged }; }
+    else { a.onIter = (it, x, comp, ch, fs, vf) => { postMessage({ t: 'i', id: m.id, a: [it, Float64Array.from(x), comp, ch, fs, vf] }); }; const r = await FEA.topopt(a); out = { x: r.x, iter: r.iter, fs: r.fs }; }
+    postMessage({ t: 'r', id: m.id, out });
+  } catch (err) { postMessage({ t: 'e', id: m.id, msg: String(err && err.message || err) }); }
+};`;
+  const WK = { w: null, id: 0, cur: null, mesh: null }; window.__WK = WK;
+  function killWorker() { if (WK.w) WK.w.terminate(); WK.w = null; WK.mesh = null; }
+  async function runMain(fn, args, hooks) {
+    const a = Object.assign({}, args, { mesh: S.mesh });
+    a.tick = async (...v) => { if (hooks.tick) hooks.tick(...v); await frame(); return !S.cancel; };
+    if (fn === 'topopt') a.onIter = async (...v) => { if (hooks.iter) hooks.iter(...v); await frame(); return !S.cancel; };
+    const r = await FEA[fn](a); if (fn === 'pcg') r.x = a.x; return r;
+  }
+  function getWorker() {
+    if (WK.w === null) {
+      try {
+        WK.w = new Worker(URL.createObjectURL(new Blob([document.getElementById('engine').textContent + GLUE], { type: 'text/javascript' })));
+        WK.w.onmessage = e => {
+          const m = e.data, c = WK.cur; if (!c || m.id !== c.id) return;
+          if (m.t === 'p') { if (c.hooks.tick) c.hooks.tick(...m.a); } else if (m.t === 'i') { if (c.hooks.iter) c.hooks.iter(...m.a); }
+          else { WK.cur = null; if (m.t === 'r') c.res(m.out); else c.rej(new Error(m.msg)); }
+        };
+        WK.w.onerror = () => { const c = WK.cur; WK.cur = null; if (WK.w) WK.w.terminate(); WK.w = false; if (c) runMain(c.fn, c.args, c.hooks).then(c.res, c.rej); };
+      } catch (err) { WK.w = false; }
+    }
+    return WK.w;
+  }
+  function run(fn, args, hooks) {
+    hooks = hooks || {}; const w = getWorker(); if (!w) return runMain(fn, args, hooks);
+    if (WK.mesh !== S.mesh) { w.postMessage({ t: 'mesh', mesh: S.mesh }); WK.mesh = S.mesh; }
+    return new Promise((res, rej) => { const id = ++WK.id; WK.cur = { id, res, rej, hooks, fn, args }; w.postMessage({ t: 'call', id, fn, args }); });
+  }
+  function stop() { S.cancel = true; const c = WK.cur; if (c) { WK.cur = null; killWorker(); c.res({ cancelled: true }); } }
+  const fail = err => { setProg(false); S.busy = false; toast('Erreur pendant le calcul : ' + (err && err.message || err)); ui(); };
+
+  const solveTick = lab => (it, res, round) => setProg(true, lab + (round > 1 ? ' — contact, passe ' + round : '') + ' — itération ' + it + ' · résidu ' + res.toExponential(1), Math.min(1, Math.log10(1 / res) / 6));
   async function calc() {
     if (S.busy) return; const p = prepare(); if (!p) return;
     S.busy = true; S.cancel = false; ui(); const m = S.mesh, t0 = performance.now();
     setProg(true, 'Résolution…', 0); await frame();
-    const scale = new Float64Array(m.ne).fill(S.mat.E * m.h);
-    const r = await FEA.solveContact({ mesh: m, Ke: p.Ke, scale, bcs: p.list, tol: 1e-6, tick: solveTick('Résolution') });
+    let r; try { r = await run('solveContact', { Ke: p.Ke, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-6, mg: true }, { tick: solveTick('Résolution') }); } catch (err) { return fail(err); }
     setProg(false); S.busy = false;
     if (r.cancelled) { toast('Calcul arrêté.', true); ui(); return; }
     if (!r.converged) { toast('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.'); ui(); return; }
@@ -979,16 +1106,18 @@ if (typeof module !== 'undefined') module.exports = FEA;
   /* analyse de contrôle de la forme optimisée (éléments conservés seulement) */
   async function verifyOpt(lab) {
     const c = S.opt.ctx, m = S.mesh; if (!c || c.mesh !== m || !S.opt.x) return null;
-    const mask = optMask(), scale = new Float64Array(m.ne), x = Float64Array.from(c.u0); let kept = 0;
+    const mask = optMask(), scale = new Float64Array(m.ne); let kept = 0;
     for (let e = 0; e < m.ne; e++) if (mask[e]) { scale[e] = S.mat.E * m.h; kept++; }
-    const r = await FEA.pcg({ mesh: m, Ke: c.Ke, scale, fixed: c.fixed, x, f: c.f, tol: 1e-5, maxIter: 6000, tick: async (it, res) => { setProg(true, (lab || 'Vérification de la forme') + ' — itération ' + it, Math.min(1, Math.log10(1 / res) / 5)); await frame(); return !S.cancel; } });
+    const r = await run('pcg', { Ke: c.Ke, scale, fixed: c.fixed, x: Float64Array.from(c.u0), f: c.f, tol: 1e-5, maxIter: 3000, mg: true }, { tick: (it, res) => setProg(true, (lab || 'Vérification de la forme') + ' — itération ' + it, Math.min(1, Math.log10(1 / res) / 5)) });
+    if (r.cancelled) return null;
     if (!r.converged) { S.opt.ver = { fail: true, thr: S.opt.thr, mesh: m }; return null; }
-    const res = FEA.computeResults(m, S.mat.E, S.mat.nu, x, mask);
+    const res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.x, mask);
     return S.opt.ver = { vmN: res.vmN, maxVm: res.maxVm, p99: res.p99, maxD: res.maxD, fs: S.mat.Sy / res.maxVm, thr: S.opt.thr, mesh: m, kept };
   }
   async function runVerify() {
     if (S.busy || !S.opt.x) return; S.busy = true; S.cancel = false; ui(); setProg(true, 'Vérification de la forme…', 0); await frame();
-    const v = await verifyOpt(); setProg(false); S.busy = false; if (!v && !S.cancel) toast('La vérification n\'a pas convergé : à ce seuil, la forme est probablement en plusieurs morceaux ou trop fine. Baissez le seuil de densité.');
+    let v; try { v = await verifyOpt(); } catch (err) { return fail(err); }
+    setProg(false); S.busy = false; if (!v && !S.cancel) toast('La vérification n\'a pas convergé : à ce seuil, la forme est probablement en plusieurs morceaux ou trop fine. Baissez le seuil de densité.');
     optBuffers(); ui();
   }
   async function runOpt() {
@@ -999,33 +1128,38 @@ if (typeof module !== 'undefined') module.exports = FEA;
     for (let e = 0; e < m.ne; e++) for (let a = 0; a < 8; a++) if (mk[m.conn[e * 8 + a]]) { passive[e] = 1; break; }
     S.busy = true; S.cancel = false; S.tab = 'opt'; o.x = null; o.ver = null; o.info = ''; optBuffers(); ui(); setProg(true, 'Analyse de la pièce pleine…', 0); await frame();
     const done = msg => { setProg(false); S.busy = false; if (msg) toast(msg); optBuffers(); ui(); };
-    /* 1. pièce pleine : zones de contact des axes et facteur de sécurité de départ */
-    const r0 = await FEA.solveContact({ mesh: m, Ke: p.Ke, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-5, tick: solveTick('Analyse de la pièce pleine') });
-    if (r0.cancelled) return done();
-    if (!r0.converged) return done('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.');
-    const fs0 = S.mat.Sy / FEA.computeResults(m, S.mat.E, S.mat.nu, r0.u).maxVm;
-    o.ctx = { mesh: m, fixed: r0.fixed, f: r0.f, passive, u0: r0.u, Ke: p.Ke, fs0 };
-    if (fsMode && fs0 < o.fs * 1.03) return done('La pièce pleine a déjà un facteur de sécurité de ' + fmt(fs0, 3) + ' : on ne peut pas atteindre ' + fmt(o.fs, 3) + ' en enlevant de la matière. Visez une valeur plus basse, ou renforcez la pièce.');
-    /* 2. optimisation */
-    const iters = Math.max(5, Math.min(300, o.iters | 0));
-    const run = (extra, n, lab) => FEA.topopt(Object.assign({
-      mesh: m, Ke: p.Ke, E: S.mat.E, nu: S.mat.nu, Sy: S.mat.Sy, fixed: r0.fixed, x0: r0.u, f: r0.f, passive, iters: n,
-      tick: async (it, i) => { setProg(true, lab + ' — itération ' + it + ' / ' + n + ' · solveur ' + i, (it - 1) / n); await frame(); return !S.cancel; },
-      onIter: async (it, x, comp, ch, fs, vf) => { o.x = Float64Array.from(x); optBuffers(); setProg(true, lab + ' — itération ' + it + ' / ' + n + (fs ? ' · FS estimé ' + fmt(fs, 3) + ' · matière ' + fmt(vf * 100, 3) + ' %' : ''), it / n); await frame(); return !S.cancel; }
-    }, extra));
-    let r = await run(fsMode ? { mode: 'fs', fsTarget: o.fs } : { mode: 'vol', volfrac: Math.max(0.05, Math.min(0.95, o.vf / 100)) }, iters, 'Optimisation');
-    o.x = Float64Array.from(r.x); let total = r.iter, note = '';
-    /* 3. contrôle sur la forme seuillée ; en mode FS, on rajoute de la matière tant que la cible n'est pas tenue */
-    if (!r.cancelled) {
-      let v = await verifyOpt('Vérification de la forme');
-      for (let k = 0; fsMode && k < 5 && !S.cancel && (!v || v.fs < 0.97 * o.fs); k++) {
-        let sum = 0; for (const q of o.x) sum += q;
-        r = await run({ mode: 'vol', xInit: o.x, volfrac: Math.min(1, sum / m.ne * 1.07) }, 6, 'Ajustement ' + (k + 1));
-        o.x = Float64Array.from(r.x); total += r.iter; if (r.cancelled) break; v = await verifyOpt('Vérification de la forme');
+    try {
+      /* 1. pièce pleine : zones de contact des axes et facteur de sécurité de départ */
+      const r0 = await run('solveContact', { Ke: p.Ke, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-5, mg: true }, { tick: solveTick('Analyse de la pièce pleine') });
+      if (r0.cancelled) return done();
+      if (!r0.converged) return done('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.');
+      const fs0 = S.mat.Sy / FEA.computeResults(m, S.mat.E, S.mat.nu, r0.u).maxVm;
+      o.ctx = { mesh: m, fixed: r0.fixed, f: r0.f, passive, u0: r0.u, Ke: p.Ke, fs0 };
+      if (fsMode && fs0 < o.fs * 1.03) return done('La pièce pleine a déjà un facteur de sécurité de ' + fmt(fs0, 3) + ' : on ne peut pas atteindre ' + fmt(o.fs, 3) + ' en enlevant de la matière. Visez une valeur plus basse, ou renforcez la pièce.');
+      /* 2. optimisation */
+      const iters = Math.max(5, Math.min(300, o.iters | 0)); let total = 0, note = '', stopped = false;
+      const pass = async (extra, n, lab) => {
+        let last = 0;
+        const r = await run('topopt', Object.assign({ Ke: p.Ke, E: S.mat.E, nu: S.mat.nu, Sy: S.mat.Sy, fixed: r0.fixed, x0: r0.u, f: r0.f, passive, iters: n, mg: true }, extra), {
+          tick: (it, i) => setProg(true, lab + ' — itération ' + it + ' / ' + n + ' · solveur ' + i, (it - 1) / n),
+          iter: (it, x, comp, ch, fs, vf) => { last = it; o.x = x; optBuffers(); setProg(true, lab + ' — itération ' + it + ' / ' + n + (fs ? ' · FS estimé ' + fmt(fs, 3) + ' · matière ' + fmt(vf * 100, 3) + ' %' : ''), it / n); }
+        });
+        if (r.cancelled) { stopped = true; total += last; } else { o.x = r.x; total += r.iter; }
+      };
+      await pass(fsMode ? { mode: 'fs', fsTarget: o.fs } : { mode: 'vol', volfrac: Math.max(0.05, Math.min(0.95, o.vf / 100)) }, iters, 'Optimisation');
+      /* 3. contrôle sur la forme seuillée ; en mode FS, on rajoute de la matière tant que la cible n'est pas tenue */
+      if (!stopped && o.x) {
+        let v = await verifyOpt('Vérification de la forme');
+        for (let k = 0; fsMode && k < 5 && !S.cancel && !stopped && (!v || v.fs < 0.97 * o.fs); k++) {
+          let sum = 0; for (const q of o.x) sum += q;
+          await pass({ mode: 'vol', xInit: o.x, volfrac: Math.min(1, sum / m.ne * 1.07) }, 6, 'Ajustement ' + (k + 1));
+          if (!stopped) v = await verifyOpt('Vérification de la forme');
+        }
+        if (fsMode && !S.cancel && v && v.fs < 0.97 * o.fs) note = ' · cible non atteinte';
       }
-      if (fsMode && v && v.fs < 0.97 * o.fs) note = ' · cible non atteinte';
-    }
-    o.info = (r.cancelled || S.cancel ? 'Arrêtée après ' : 'Terminée en ') + total + ' itérations' + note; done();
+      if (o.x) o.info = (stopped || S.cancel ? 'Arrêtée après ' : 'Terminée en ') + total + ' itérations' + note;
+      done();
+    } catch (err) { fail(err); }
   }
 
   /* ---------- fichiers ---------- */
@@ -1096,7 +1230,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     <div class="row"><span>Éléments estimés</span><span class="val">≈ ${fmt(est, 2)}</span></div><div class="row"><span>Éléments dans la plus petite dimension</span><span class="val">${fmt(mn / S.h, 2)}</span></div></div>
     <div class="btns"><button class="btn" data-act="hfine">Plus fin</button><button class="btn" data-act="hcoarse">Plus grossier</button></div>
     <button class="btn primary wide" data-act="mesh">Générer le maillage</button>
-    <div class="mut small" style="margin-top:10px">Visez au moins 3 à 4 éléments dans l'épaisseur des zones chargées. Jusqu'à environ 100 000 éléments, le calcul reste confortable ; au-delà, il devient long.</div>`;
+    <div class="mut small" style="margin-top:10px">Visez au moins 3 à 4 éléments dans l'épaisseur des zones chargées. Le calcul tourne en arrière-plan : comptez quelques secondes jusqu'à 50 000 éléments, de l'ordre d'une minute vers 300 000.</div>`;
     if (S.mesh) h += `<div class="sec">MAILLAGE ACTUEL</div><div class="card"><div class="row"><span>Éléments</span><span class="val">${fmt(S.mesh.ne, 7)}</span></div><div class="row"><span>Nœuds</span><span class="val">${fmt(S.mesh.nn, 7)}</span></div>
     <div class="row"><span>Volume maillé / volume CAO</span><span class="val">${fmt(S.mesh.ne * S.mesh.h ** 3 / S.gi.volume * 100, 4)} %</span></div></div>${S.mesh.h !== S.h ? '<div class="chk"><i class="wn"></i><span>La taille a changé : régénérez le maillage.</span></div>' : ''}`;
     return h;
@@ -1154,7 +1288,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     <div class="row"><span>Itérations maximales</span>${num('opt.iters', o.iters, 10, 'min="5" max="300"')}</div>${c ? `<div class="row"><span>FS de la pièce pleine</span><span class="val">${fmt(c.fs0, 3)}</span></div>` : ''}</div>
     <div class="mut small" style="margin-bottom:10px">${fsM ? 'La matière est retirée peu à peu tant que le facteur de sécurité (limite élastique ÷ von Mises maximale) reste au-dessus de la cible. La forme finale est ensuite recalculée pour contrôle. La cible doit être inférieure au facteur de sécurité de la pièce pleine.' : 'La pièce est allégée jusqu\'au pourcentage demandé, puis recalculée pour afficher son facteur de sécurité.'}</div>
     <button class="btn primary wide" data-act="opt" ${S.busy ? 'disabled' : ''}>Lancer l'optimisation</button>
-    <div class="mut small" style="margin-top:10px">Chaque itération refait un calcul complet : utilisez un maillage modéré (10 000 à 30 000 éléments).</div>`;
+    <div class="mut small" style="margin-top:10px">Chaque itération refait un calcul complet : commencez avec un maillage modéré (20 000 à 60 000 éléments).</div>`;
     if (o.x) {
       const kept = o.kept || 0, v = verOk(), fail = o.ver && o.ver.fail && o.ver.thr === o.thr;
       const cls = v ? (v.fs >= (fsM ? 0.97 * o.fs : S.fsTarget) ? 'ok' : v.fs >= 1 ? 'wn' : 'no') : '';
@@ -1204,7 +1338,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
 
   /* ---------- événements ---------- */
   const ACT = {
-    open: () => $('#file').click(), import: () => $('#file').click(), demo: loadDemo, save, calc, fit, stop: () => { S.cancel = true; },
+    open: () => $('#file').click(), import: () => $('#file').click(), demo: loadDemo, save, calc, fit, stop,
     menu: () => $('#viewMenu').classList.toggle('open'), help,
     mesh: () => { if (genMesh()) ui(); }, hfine: () => { S.h = +(S.h / 1.25).toPrecision(3); ui(); }, hcoarse: () => { S.h = +(S.h * 1.25).toPrecision(3); ui(); },
     addfix: () => addBC('fix'), addpin: () => addBC('pin'), verify: runVerify, adddisp: () => addBC('disp'), addforce: () => addBC('force'), clearsel: () => { S.sel.fill(0); geoColors(); ui(); },
