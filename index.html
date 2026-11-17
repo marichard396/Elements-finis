@@ -1829,7 +1829,8 @@ if (typeof module !== 'undefined') module.exports = FEA;
     { n: 'Titane Ti-6Al-4V', E: 113800, nu: 0.342, Sy: 880, rho: 4430 },
     { n: 'Personnalisé', E: 200000, nu: 0.3, Sy: 250, rho: 7850 }];
   const TABS = [['model', 'Modèle'], ['mesh', 'Maillage'], ['study', 'Étude'], ['results', 'Résultats'], ['opt', 'Optimisation']];
-  const BCC = { fix: [0.33, 0.6, 1.0], pin: [0.2, 0.8, 0.72], disp: [0.68, 0.5, 1.0], force: [0.96, 0.78, 0.25] }, BCN = { fix: 'Appui fixe', pin: 'Axe / boulon', disp: 'Déplacement imposé', force: 'Force' };
+  const BCC = { fix: [0.33, 0.6, 1.0], pin: [0.2, 0.8, 0.72], disp: [0.68, 0.5, 1.0], force: [0.96, 0.78, 0.25], keep: [0.56, 0.86, 0.36] }, BCN = { fix: 'Appui fixe', pin: 'Axe / boulon', disp: 'Déplacement imposé', force: 'Force', keep: 'Zone conservée (optimisation)' };
+  const isSup = b => b.type === 'fix' || b.type === 'pin' || b.type === 'disp';
   const hex = c => '#' + c.map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
 
   /* chaque onglet est un projet : tout son état est dans un objet comme celui-ci (S = projet affiché) */
@@ -1925,7 +1926,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     for (const b of S.bcs) {
       const p = project(b.c); if (!p) continue;
       const col = hex(BCC[b.type]); ctx.strokeStyle = ctx.fillStyle = col;
-      if (b.type === 'fix' || b.type === 'pin') { ctx.fillRect(p[0] - 4, p[1] - 4, 8, 8); ctx.fillText(b.name, p[0] + 9, p[1] + 4); continue; }
+      if (b.type === 'fix' || b.type === 'pin' || b.type === 'keep') { ctx.fillRect(p[0] - 4, p[1] - 4, 8, 8); ctx.fillText(b.name, p[0] + 9, p[1] + 4); continue; }
       const v = b.type === 'disp' ? b.v.map((q, i) => b.free[i] ? 0 : q) : b.v, m = Math.hypot(v[0], v[1], v[2]);
       const lab = b.type === 'force' ? (b.bearing ? 'palier ' : '') + fmt(m / (S.forceUnit === 'lbf' ? LBF : 1), 4) + ' ' + S.forceUnit : fmt(m, 3) + ' mm';
       if (m === 0) { ctx.fillText(b.name, p[0] + 9, p[1] + 4); continue; }
@@ -2113,7 +2114,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
   }
   function geoColors() {
     if (!S.geoCol) return; const C = S.geoCol, nt = S.surf.nt, own = new Int8Array(nt).fill(-1);
-    S.bcs.forEach((b, i) => { for (const t of b.tris) own[t] = i; });
+    S.bcs.forEach((b, i) => { if (b.type === 'keep') for (const t of b.tris) own[t] = i; }); S.bcs.forEach((b, i) => { if (b.type !== 'keep') for (const t of b.tris) own[t] = i; });
     for (let t = 0; t < nt; t++) {
       let r = 0.6, g = 0.65, b = 0.72;
       if (own[t] >= 0) { const bc = S.bcs[own[t]], c = BCC[bc.type], k = bc.id === S.activeBC ? 1 : 0.8; r = c[0] * k; g = c[1] * k; b = c[2] * k; }
@@ -2260,11 +2261,11 @@ if (typeof module !== 'undefined') module.exports = FEA;
   const selList = () => { const o = []; if (S.sel) for (let t = 0; t < S.sel.length; t++) if (S.sel[t]) o.push(t); return o; };
   function addBC(type, tris) {
     tris = tris || selList(); if (!tris.length) { toast('Sélectionnez d\'abord une ou plusieurs faces dans la vue 3D.'); return null; }
-    const set = new Set(tris); for (const b of S.bcs) b.tris = b.tris.filter(t => !set.has(t));
+    const keep = type === 'keep', set = new Set(tris); for (const b of S.bcs) if ((b.type === 'keep') === keep) b.tris = b.tris.filter(t => !set.has(t));
     S.bcs = S.bcs.filter(b => b.tris.length);
     const n = S.bcs.filter(b => b.type === type).length + 1;
-    const bc = { id: S.nextId++, type, name: (type === 'fix' ? 'Appui ' : type === 'pin' ? 'Axe ' : type === 'disp' ? 'Déplacement ' : 'Force ') + n, tris, v: [0, 0, 0], free: [false, false, false], bearing: false, c: centroid(tris) };
-    S.bcs.push(bc); S.dirty = true; S.activeBC = bc.id; S.sel.fill(0); S.stale = !!S.res; S.tab = 'study'; geoColors(); ui(); return bc;
+    const bc = { id: S.nextId++, type, name: (type === 'fix' ? 'Appui ' : type === 'pin' ? 'Axe ' : type === 'disp' ? 'Déplacement ' : type === 'keep' ? 'Zone ' : 'Force ') + n, tris, v: [0, 0, 0], free: [false, false, false], bearing: false, keepT: +Math.max(3, 1.5 * S.h).toPrecision(2), c: centroid(tris) };
+    S.bcs.push(bc); S.dirty = true; S.activeBC = bc.id; S.sel.fill(0); if (!keep) S.stale = !!S.res; S.tab = 'study'; geoColors(); ui(); return bc;
   }
   const meshOk = () => !!S.mesh && S.mesh.h === S.h && (S.elType === 'hex' || !!S.mesh.tet);
   function genMesh() {
@@ -2285,11 +2286,12 @@ if (typeof module !== 'undefined') module.exports = FEA;
   function setProg(on, txt, frac) { $('#prog').classList.toggle('on', on); if (on) { $('#progT').textContent = txt; $('#progB').style.width = Math.round((frac || 0) * 100) + '%'; } }
   function prepare() {
     if (!S.tris) { toast('Chargez d\'abord une pièce.'); return null; }
-    if (!S.bcs.some(b => b.type !== 'force')) { toast('Ajoutez au moins un appui : sans appui, la pièce est libre de bouger.'); S.tab = 'study'; ui(); return null; }
+    if (!S.bcs.some(isSup)) { toast('Ajoutez au moins un appui : sans appui, la pièce est libre de bouger.'); S.tab = 'study'; ui(); return null; }
     if (!S.bcs.some(b => b.type === 'force' && Math.hypot(...b.v) > 0) && !S.bcs.some(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0))) { toast('Ajoutez au moins une force ou un déplacement imposé non nul.'); S.tab = 'study'; ui(); return null; }
     if (!meshOk()) { if (!genMesh()) return null; }
     const list = [], m = S.mesh, N = S.surf.normals;
-    for (const b of S.bcs) {
+    const act = S.bcs.filter(b => b.type !== 'keep');
+    for (const b of act) {
       if (b.type === 'force') {
         const ld = FEA.surfaceLoad(m, S.tris, N, b.tris, b.v, !!b.bearing);
         if (!ld.nodes.length) { toast('« ' + b.name + ' » ne touche pas le maillage. Affinez le maillage.'); return null; }
@@ -2303,8 +2305,8 @@ if (typeof module !== 'undefined') module.exports = FEA;
     }
     let tet = null;
     if (S.elType === 'tet') {
-      tet = FEA.tet.tetBCs(m.tet, N, S.surf.nt, S.bcs.map(b => ({ type: b.type, tris: b.tris, bearing: !!b.bearing, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v })), S.tris);
-      for (let i = 0; i < tet.length; i++) if (!tet[i].nodes.length) { toast('« ' + S.bcs[i].name + ' » ne touche aucune face du maillage. Affinez le maillage.'); return null; }
+      tet = FEA.tet.tetBCs(m.tet, N, S.surf.nt, act.map(b => ({ type: b.type, tris: b.tris, bearing: !!b.bearing, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v })), S.tris);
+      for (let i = 0; i < tet.length; i++) if (!tet[i].nodes.length) { toast('« ' + act[i].name + ' » ne touche aucune face du maillage. Affinez le maillage.'); return null; }
     }
     return { nu: S.mat.nu, kpen: 4 * S.mat.E * m.h, list, tet, pins: list.some(b => b.type === 'pin') };
   }
@@ -2404,6 +2406,25 @@ onmessage = async e => {
     setProg(false); S.busy = false; if (!v && !S.cancel) toast('La vérification n\'a pas convergé : à ce seuil, la forme est probablement en plusieurs morceaux ou trop fine. Baissez le seuil de densité.');
     optBuffers(); ui();
   }
+  /* éléments à conserver pendant l'optimisation : centre à moins de l'épaisseur choisie des faces d'une zone conservée */
+  function keepMask(tet) {
+    const zones = S.bcs.filter(b => b.type === 'keep'); if (!zones.length) return null;
+    const m = S.mesh, h = m.h, T = S.tris, ne = tet ? m.tet.nt : m.ne, C = new Float64Array(ne * 3), out = new Uint8Array(ne), d2pt = FEA._i.d2PointTri;
+    if (tet) { const X = m.tet.coords, E = m.tet.tets; for (let e = 0; e < ne; e++) for (let q = 0; q < 4; q++) for (let k = 0; k < 3; k++) C[e * 3 + k] += X[E[e * 10 + q] * 3 + k] / 4; }
+    else { const X = m.coords, E = m.conn; for (let e = 0; e < ne; e++) for (let q = 0; q < 8; q++) for (let k = 0; k < 3; k++) C[e * 3 + k] += X[E[e * 8 + q] * 3 + k] / 8; }
+    for (const z of zones) {
+      const d = Math.max(z.keepT || 0, 0.6 * h), d2 = d * d, cs = Math.max(d, h), grid = new Map(), key = (i, j, k) => i + ',' + j + ',' + k;
+      for (const t of z.tris) {
+        const i9 = t * 9, lo = [0, 1, 2].map(k => Math.floor((Math.min(T[i9 + k], T[i9 + 3 + k], T[i9 + 6 + k]) - d) / cs)), hi = [0, 1, 2].map(k => Math.floor((Math.max(T[i9 + k], T[i9 + 3 + k], T[i9 + 6 + k]) + d) / cs));
+        for (let i = lo[0]; i <= hi[0]; i++) for (let j = lo[1]; j <= hi[1]; j++) for (let k = lo[2]; k <= hi[2]; k++) { const kk = key(i, j, k); let l = grid.get(kk); if (!l) grid.set(kk, l = []); l.push(t); }
+      }
+      for (let e = 0; e < ne; e++) {
+        if (out[e]) continue; const l = grid.get(key(Math.floor(C[e * 3] / cs), Math.floor(C[e * 3 + 1] / cs), Math.floor(C[e * 3 + 2] / cs))); if (!l) continue;
+        for (const t of l) if (d2pt(C[e * 3], C[e * 3 + 1], C[e * 3 + 2], T, t * 9) <= d2) { out[e] = 1; break; }
+      }
+    }
+    return out;
+  }
   async function runOpt() {
     if (S.busy) return; const p = prepare(); if (!p) return;
     const m = S.mesh, tet = S.elType === 'tet' && !!m.tet, o = S.opt, fsMode = o.mode === 'fs';
@@ -2412,6 +2433,10 @@ onmessage = async e => {
     let passive;
     if (tet) { const tm = m.tet, mk = new Uint8Array(tm.nn); passive = new Uint8Array(tm.nt); for (const b of p.tet) for (const n of b.nodes) mk[n] = 1; for (let e = 0; e < tm.nt; e++) for (let a = 0; a < 10; a++) if (mk[tm.tets[e * 10 + a]]) { passive[e] = 1; break; } }
     else { const mk = new Uint8Array(m.nn); passive = new Uint8Array(m.ne); for (const b of p.list) for (const n of b.nodes) mk[n] = 1; for (let e = 0; e < m.ne; e++) for (let a = 0; a < 8; a++) if (mk[m.conn[e * 8 + a]]) { passive[e] = 1; break; } }
+    /* zones conservées choisies par l'utilisateur */
+    const km = keepMask(tet); o.keepInfo = null;
+    if (km) { const wv = tet ? m.tet.vol : m.fill; let kv = 0, tv = 0; for (let e = 0; e < km.length; e++) { tv += wv[e]; if (km[e]) { passive[e] = 1; kv += wv[e]; } } o.keepInfo = { frac: kv / tv, n: S.bcs.filter(b => b.type === 'keep').length };
+      if (o.mode === 'vol' && kv / tv > o.vf / 100 * 0.9) { toast('Les zones conservées représentent déjà ' + fmt(kv / tv * 100, 3) + ' % de la pièce : augmentez la matière à conserver, ou réduisez leur épaisseur.'); return; } }
     S.busy = true; S.cancel = false; S.tab = 'opt'; o.x = null; o.ver = null; o.info = ''; optBuffers(); ui(); setProg(true, 'Analyse de la pièce pleine…', 0); await frame();
     const done = msg => { setProg(false); S.busy = false; if (msg) toast(msg); optBuffers(); ui(); };
     try {
@@ -2456,7 +2481,7 @@ onmessage = async e => {
   const baseName = n => String(n || 'Sans titre').replace(/\.aef\.json$/i, '').replace(/\.(json|stl)$/i, '');
   const PICK_TYPES = [{ description: 'Projet Analyse éléments finis 3D', accept: { 'application/json': ['.json'] } }];
   function projectJSON(P) {
-    return JSON.stringify({ app: 'aef3d', version: 1, name: baseName(P.name), unit: P.unit, tris: b64(P.raw), matIdx: P.matIdx, mat: P.mat, h: P.h, elType: P.elType, fsTarget: P.fsTarget, forceUnit: P.forceUnit, selMode: P.selMode, selTol: P.selTol, opt: { mode: P.opt.mode, vf: P.opt.vf, fs: P.opt.fs, iters: P.opt.iters }, bcs: P.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick })) });
+    return JSON.stringify({ app: 'aef3d', version: 1, name: baseName(P.name), unit: P.unit, tris: b64(P.raw), matIdx: P.matIdx, mat: P.mat, h: P.h, elType: P.elType, fsTarget: P.fsTarget, forceUnit: P.forceUnit, selMode: P.selMode, selTol: P.selTol, opt: { mode: P.opt.mode, vf: P.opt.vf, fs: P.opt.fs, iters: P.opt.iters }, bcs: P.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick, keepT: b.keepT })) });
   }
   /* Enregistrer : la première fois, Chrome ouvre sa fenêtre pour choisir l'emplacement ; ensuite le même fichier est réécrit.
      Enregistrer sous : la fenêtre s'ouvre toujours. Sans cette possibilité (autre navigateur), le fichier va dans Téléchargements. */
@@ -2557,7 +2582,7 @@ onmessage = async e => {
   const fU = () => S.forceUnit === 'lbf' ? LBF : 1;
   const num = (path, val, step, extra) => `<input type="number" data-set="${path}" value="${val}" step="${step || 'any'}" ${extra || ''}>`;
   function checks() {
-    const sup = S.bcs.filter(b => b.type !== 'force').length, ld = S.bcs.filter(b => b.type === 'force' && Math.hypot(...b.v) > 0).length + S.bcs.filter(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0)).length;
+    const sup = S.bcs.filter(isSup).length, ld = S.bcs.filter(b => b.type === 'force' && Math.hypot(...b.v) > 0).length + S.bcs.filter(b => b.type === 'disp' && b.v.some((v, i) => !b.free[i] && v !== 0)).length;
     return { geo: !!S.tris, mesh: meshOk(), sup, ld, ready: !!S.tris && sup > 0 && ld > 0 };
   }
   function panelModel() {
@@ -2598,7 +2623,7 @@ onmessage = async e => {
   function panelStudy() {
     if (!S.tris) return `<div class="sec">ÉTUDE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
     const c = checks(), k = fU();
-    let h = `<div class="sec">APPUIS <b>${S.bcs.filter(b => b.type !== 'force').length}</b></div>${chips(['fix', 'pin', 'disp'])}<div class="sec">CHARGES <b>${S.bcs.filter(b => b.type === 'force').length}</b></div>${chips(['force'])}`;
+    let h = `<div class="sec">APPUIS <b>${S.bcs.filter(isSup).length}</b></div>${chips(['fix', 'pin', 'disp'])}<div class="sec">CHARGES <b>${S.bcs.filter(b => b.type === 'force').length}</b></div>${chips(['force'])}${S.bcs.some(b => b.type === 'keep') ? `<div class="sec">ZONES CONSERVÉES <b>${S.bcs.filter(b => b.type === 'keep').length}</b></div>${chips(['keep'])}` : ''}`;
     const b = S.bcs.find(x => x.id === S.activeBC);
     if (b) {
       h += `<div class="card active"><label class="f" style="margin-top:0">${BCN[b.type]} · ${b.tris.length} triangle(s)</label><input type="text" data-set="bc.name" value="${esc(b.name)}">`;
@@ -2609,7 +2634,8 @@ onmessage = async e => {
           <div class="mut small">${b.bearing ? 'L\'axe ne fait que pousser : la force est appliquée seulement sur le côté de l\'alésage vers lequel elle pointe, plus fortement au centre de la zone d\'appui.' : 'Force totale, répartie uniformément sur les faces choisies (comme si elles étaient collées à ce qui les charge).'}</div>`;
       } else if (b.type === 'disp') {
         h += ['X', 'Y', 'Z'].map((a, i) => `<div class="row"><span><input type="checkbox" data-set="bc.fix${i}" ${b.free[i] ? '' : 'checked'}> Imposer ${a} (mm)</span>${num('bc.d' + i, b.v[i], 'any', b.free[i] ? 'disabled' : '')}</div>`).join('') + `<div class="mut small">Décochez un axe pour le laisser libre.</div>`;
-      } else if (b.type === 'pin') h += `<div class="row"><span><input type="checkbox" data-set="bc.stick" ${b.stick ? 'checked' : ''}> Boulon serré (sans glissement)</span></div><div class="mut small">Axe ou boulon rigide dans un alésage : il retient la pièce seulement là où elle vient s'appuyer contre lui ; le côté qui s'en écarte est laissé libre. ${b.stick ? 'La matière en appui est tenue dans toutes les directions.' : 'La matière peut glisser autour de l\'axe, comme sur une articulation.'} La zone de contact est trouvée automatiquement (quelques passes de calcul).</div>`;
+      } else if (b.type === 'keep') h += `<div class="row"><span>Épaisseur conservée (mm)</span>${num('bc.keepT', b.keepT, 0.5, 'min="0"')}</div><div class="mut small">Pendant l'optimisation topologique, toute la matière à moins de cette distance des faces choisies reste en place (au moins 0,6 × la taille d'élément, soit ${fmt(0.6 * S.h, 2)} mm). Sans effet sur l'analyse : la zone peut recouvrir un appui ou une charge.</div>`;
+      else if (b.type === 'pin') h += `<div class="row"><span><input type="checkbox" data-set="bc.stick" ${b.stick ? 'checked' : ''}> Boulon serré (sans glissement)</span></div><div class="mut small">Axe ou boulon rigide dans un alésage : il retient la pièce seulement là où elle vient s'appuyer contre lui ; le côté qui s'en écarte est laissé libre. ${b.stick ? 'La matière en appui est tenue dans toutes les directions.' : 'La matière peut glisser autour de l\'axe, comme sur une articulation.'} La zone de contact est trouvée automatiquement (quelques passes de calcul).</div>`;
       else h += `<div class="mut small" style="margin-top:8px">Les faces choisies sont bloquées dans les trois directions, comme si elles étaient soudées à un bâti rigide.</div>`;
       h += `<div class="btns"><button class="btn" data-act="bcsel">Reprendre ses faces en sélection</button><button class="btn danger" data-act="bcdel">Supprimer</button></div></div>`;
     } else h += `<div class="mut small" style="margin-top:12px">Cliquez une ou plusieurs faces dans la vue, puis créez un appui ou une charge avec les boutons du panneau de droite. Cliquez une étiquette ci-dessus pour la modifier.</div>`;
@@ -2650,6 +2676,7 @@ onmessage = async e => {
     <div class="card">${fsM ? `<div class="row"><span>Facteur de sécurité visé</span>${num('opt.fs', o.fs, 0.1, 'min="1"')}</div>` : `<div class="row"><span>Matière à conserver (%)</span>${num('opt.vf', o.vf, 5, 'min="5" max="95"')}</div>`}
     <div class="row"><span>Itérations maximales</span>${num('opt.iters', o.iters, 10, 'min="5" max="300"')}</div>${c ? `<div class="row"><span>FS de la pièce pleine</span><span class="val">${fmt(c.fs0, 3)}</span></div>` : ''}</div>
     <div class="mut small" style="margin-bottom:10px">${fsM ? 'La matière est retirée peu à peu tant que le facteur de sécurité (limite élastique ÷ von Mises maximale) reste au-dessus de la cible. La forme finale est ensuite recalculée pour contrôle. La cible doit être inférieure au facteur de sécurité de la pièce pleine.' : 'La pièce est allégée jusqu\'au pourcentage demandé, puis recalculée pour afficher son facteur de sécurité.'}</div>
+    <label class="f">Zones conservées</label>${(() => { const z = S.bcs.filter(b => b.type === 'keep'); return (z.length ? `<div class="chips">${z.map(b => `<span class="chip"><i style="background:${hex(BCC.keep)}"></i>${esc(b.name)} · ${fmt(b.keepT, 3)} mm</span>`).join('')}</div>` : '<div class="mut small">Aucune. Les zones d\'appui et de charge sont toujours conservées.</div>') + `<div class="btns"><button class="btn" data-act="gokeep">Ajouter une zone à conserver…</button></div>`; })()}
     <button class="btn primary wide" data-act="opt" ${S.busy ? 'disabled' : ''}>Lancer l'optimisation</button>
     <div class="mut small" style="margin-top:10px">${S.elType === 'tet' ? 'Sur tétraèdres : chaque itération refait un calcul complet, comptez 1 à 3 s par itération pour 5 000 à 15 000 tétraèdres. Le seuil de netteté se durcit par paliers pendant les 50 premières itérations : gardez au moins 60 itérations. La forme obtenue est une surface lisse.' : 'Chaque itération refait un calcul complet : commencez avec un maillage modéré (20 000 à 60 000 éléments).'}</div>`;
     if (o.x) {
@@ -2657,7 +2684,7 @@ onmessage = async e => {
       const cls = v ? (v.fs >= (fsM ? 0.97 * o.fs : S.fsTarget) ? 'ok' : v.fs >= 1 ? 'wn' : 'no') : '';
       h += `<div class="sec">RÉSULTAT</div>${v ? `<div class="verdict ${cls}">FS vérifié = ${fmt(v.fs, 3)}<small>${fsM ? 'Cible : ' + fmt(o.fs, 3) : 'Facteur visé dans Résultats : ' + fmt(S.fsTarget, 3)} · pièce pleine : ${c ? fmt(c.fs0, 3) : '—'}</small></div>` : ''}
       <div class="card"><div class="row"><span>État</span><span class="val">${esc(o.info || 'En cours…')}</span></div>
-      <div class="row"><span>Matière conservée</span><span class="val">${fmt((o.keptVol || 0) / (o.totVol || 1) * 100, 3)} %</span></div><div class="row"><span>Masse</span><span class="val">${fmt((o.keptVol || 0) * S.mat.rho * 1e-9, 3)} kg</span></div>
+      <div class="row"><span>Matière conservée</span><span class="val">${fmt((o.keptVol || 0) / (o.totVol || 1) * 100, 3)} %</span></div>${o.keepInfo ? `<div class="row"><span>dont zones conservées</span><span class="val">${fmt(o.keepInfo.frac * 100, 3)} %</span></div>` : ''}<div class="row"><span>Masse</span><span class="val">${fmt((o.keptVol || 0) * S.mat.rho * 1e-9, 3)} kg</span></div>
       ${v ? `<div class="row"><span>von Mises maximale</span><span class="val">${fmt(v.maxVm, 4)} MPa</span></div><div class="row"><span>von Mises, 99ᵉ centile</span><span class="val">${fmt(v.p99, 4)} MPa</span></div><div class="row"><span>Déplacement maximal</span><span class="val">${fmt(v.maxD, 4)} mm</span></div>
       <div class="row"><span><input type="checkbox" data-set="opt.colorVm" ${o.colorVm ? 'checked' : ''}> Colorer selon la contrainte</span></div>` : ''}
       <label class="f">Seuil de densité ${optTet() ? '(surface tracée à ce niveau)' : 'affiché'} : ${fmt(o.thr, 2)}</label><input type="range" min="0.05" max="0.95" step="0.05" value="${o.thr}" data-set="opt.thr"></div>
@@ -2677,6 +2704,7 @@ onmessage = async e => {
     <div class="row"><span>Angle de tangence (°)</span>${num('selTol', S.selTol, 1, 'min="1" max="60"')}</div>
     <div class="sec">SÉLECTION</div>${n ? `<div class="card"><div class="row"><span>Triangles</span><span class="val">${fmt(n, 6)}</span></div><div class="row"><span>Aire</span><span class="val">${fmt(A, 4)} mm²</span></div></div>` : '<div class="mut small">Aucune face sélectionnée.</div>'}
     <div class="btns"><button class="btn" data-act="addfix" ${n ? '' : 'disabled'}>Appui fixe</button><button class="btn" data-act="addpin" ${n ? '' : 'disabled'}>Axe / boulon</button><button class="btn" data-act="adddisp" ${n ? '' : 'disabled'}>Déplacement imposé</button><button class="btn" data-act="addforce" ${n ? '' : 'disabled'}>Force</button></div>
+    <div class="btns" style="margin-top:2px"><button class="btn" data-act="addkeep" ${n ? '' : 'disabled'} title="Matière à ne pas retirer pendant l'optimisation topologique"><i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${hex(BCC.keep)};margin-right:6px"></i>Zone conservée</button></div>
     <div class="btns"><button class="btn" data-act="clearsel" ${n ? '' : 'disabled'}>Vider la sélection</button></div>
     <div class="sec">MODES</div><div class="mut small"><b style="color:#c5cfdb">Auto</b> : face plane, ou surface courbe entière (alésage, congé).<br><b style="color:#c5cfdb">Plane</b> : uniquement les triangles coplanaires.<br><b style="color:#c5cfdb">Tangente</b> : s'étend tant que l'angle entre triangles voisins reste sous la limite.</div>`;
   }
@@ -2689,7 +2717,7 @@ onmessage = async e => {
     } else if (S.tab === 'opt' && S.opt.x && S.opt.colorVm && !S.busy && verOk()) h = `<div class="t">Forme optimisée · von Mises <span>(MPa)</span></div><div class="bar"></div><div class="mm"><span>0</span><span>${fmt(verOk().maxVm, 3)}</span></div><div class="mut" style="margin-top:6px">${S.probe ? 'Au point visé : <b style="color:#fff">' + S.probe + '</b>' : 'Survolez la pièce pour lire la valeur.'}</div>`;
     else if (S.tab === 'opt' && S.opt.x) h = `<div class="t">Forme optimisée</div><div class="ln"><i style="background:#e8855c"></i>Matière conservée (densité > ${fmt(S.opt.thr, 2)})</div>`;
     else if ((S.tab === 'mesh' || S.tab === 'results' || S.tab === 'opt') && S.mesh) h = `<div class="t">Maillage <span>(éléments de ${fmt(S.mesh.h)} mm)</span></div><div class="ln"><i style="background:#809ec7"></i>${S.elType === 'tet' && S.mesh.tet ? fmt(S.mesh.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'}</div>`;
-    else if (S.tris) h = `<div class="t">Géométrie</div><div class="ln"><i style="background:#e8734f"></i>Sélection</div><div class="ln"><i style="background:${hex(BCC.fix)}"></i>Appui fixe</div><div class="ln"><i style="background:${hex(BCC.pin)}"></i>Axe / boulon</div><div class="ln"><i style="background:${hex(BCC.disp)}"></i>Déplacement imposé</div><div class="ln"><i style="background:${hex(BCC.force)}"></i>Force</div>`;
+    else if (S.tris) h = `<div class="t">Géométrie</div><div class="ln"><i style="background:#e8734f"></i>Sélection</div><div class="ln"><i style="background:${hex(BCC.fix)}"></i>Appui fixe</div><div class="ln"><i style="background:${hex(BCC.pin)}"></i>Axe / boulon</div><div class="ln"><i style="background:${hex(BCC.disp)}"></i>Déplacement imposé</div><div class="ln"><i style="background:${hex(BCC.force)}"></i>Force</div>${S.bcs.some(b => b.type === 'keep') ? `<div class="ln"><i style="background:${hex(BCC.keep)}"></i>Zone conservée</div>` : ''}`;
     L.innerHTML = h; L.style.display = h ? '' : 'none';
   }
   function ui() {
@@ -2712,9 +2740,9 @@ onmessage = async e => {
     menu: () => $('#viewMenu').classList.toggle('open'), help,
     mesh: () => { if (genMesh()) ui(); }, hfine: () => { S.h = +(S.h / 1.25).toPrecision(3); ui(); }, hcoarse: () => { S.h = +(S.h * 1.25).toPrecision(3); ui(); },
     clearlabels: () => { S.labels = S.labels.filter(L => S.tab === 'opt' ? L.tab !== 'opt' : L.tab !== 'results'); R.need = true; ui(); },
-    addfix: () => addBC('fix'), addpin: () => addBC('pin'), verify: runVerify, adddisp: () => addBC('disp'), addforce: () => addBC('force'), clearsel: () => { S.sel.fill(0); geoColors(); ui(); },
+    addfix: () => addBC('fix'), addpin: () => addBC('pin'), addkeep: () => addBC('keep'), gokeep: () => { S.tab = 'study'; geoColors(); ui(); toast('Cliquez les faces à conserver (mode Auto : un trou entier ou une face plane), Ctrl+clic pour en ajouter, puis « Zone conservée » à droite.', true); }, verify: runVerify, adddisp: () => addBC('disp'), addforce: () => addBC('force'), clearsel: () => { S.sel.fill(0); geoColors(); ui(); },
     bc: el => { const id = +el.dataset.id; S.activeBC = S.activeBC === id ? null : id; geoColors(); ui(); },
-    bcdel: () => { S.dirty = true; S.bcs = S.bcs.filter(b => b.id !== S.activeBC); S.activeBC = null; S.stale = !!S.res; geoColors(); ui(); },
+    bcdel: () => { S.dirty = true; const d = S.bcs.find(b => b.id === S.activeBC); S.bcs = S.bcs.filter(b => b.id !== S.activeBC); S.activeBC = null; if (d && d.type !== 'keep') S.stale = !!S.res; geoColors(); ui(); },
     bcsel: () => { const b = S.bcs.find(x => x.id === S.activeBC); if (b) { S.sel.fill(0); for (const t of b.tris) S.sel[t] = 1; geoColors(); ui(); } },
     opt: runOpt, optstl: exportOptSTL, closemodal: () => $('#modal').classList.remove('on')
   };
@@ -2743,8 +2771,8 @@ onmessage = async e => {
     const b = S.bcs.find(x => x.id === S.activeBC);
     if (p.startsWith('bc.')) {
       if (!b) return; const k = p.slice(3);
-      if (k === 'name') b.name = v || b.name; else if (k[0] === 'f' && k.length === 2) b.v[+k[1]] = v * fU(); else if (k[0] === 'd') b.v[+k[1]] = v; else if (k.startsWith('fix')) b.free[+k[3]] = !v; else if (k === 'bearing') b.bearing = v; else if (k === 'stick') b.stick = v;
-      if (k !== 'name') S.stale = !!S.res;
+      if (k === 'name') b.name = v || b.name; else if (k[0] === 'f' && k.length === 2) b.v[+k[1]] = v * fU(); else if (k[0] === 'd') b.v[+k[1]] = v; else if (k.startsWith('fix')) b.free[+k[3]] = !v; else if (k === 'bearing') b.bearing = v; else if (k === 'stick') b.stick = v; else if (k === 'keepT') b.keepT = Math.max(0, v);
+      if (k !== 'name' && b.type !== 'keep') S.stale = !!S.res;
     } else if (p === 'unit') { S.unit = v; applyUnit(); S.h = defaultH(); }
     else if (p === 'matIdx') { S.matIdx = v; S.mat = Object.assign({}, MATS[v]); S.stale = !!S.res; }
     else if (p.startsWith('mat.')) { const k = p.slice(4); if (!(v > 0) || (k === 'nu' && v >= 0.499)) { toast('Valeur de matériau invalide.'); ui(); return; } S.mat[k] = v; S.matIdx = MATS.length - 1; S.mat.n = 'Personnalisé'; if (k === 'E' || k === 'nu') S.stale = !!S.res; }
@@ -2774,7 +2802,7 @@ onmessage = async e => {
     if (e.key === 'Escape') { $('#saveMenu').classList.remove('open'); $('#modal').classList.remove('on'); if (S.sel && selectable() && !/INPUT|SELECT/.test(document.activeElement.tagName)) { S.sel.fill(0); geoColors(); ui(); } } });
   function help() {
     $('#modal').innerHTML = `<div class="box"><h2>Analyse éléments finis 3D — aide</h2>
-    <h3>Déroulement</h3><ol><li><b>Modèle</b> : importez le STL de la pièce, vérifiez les dimensions et choisissez le matériau.</li><li><b>Maillage</b> : réglez la taille d'élément et générez le maillage.</li><li><b>Étude</b> : cliquez les faces dans la vue, puis créez les appuis et les forces (panneau de droite).</li><li><b>Calculer</b>, puis lisez le bilan dans <b>Résultats</b>.</li><li><b>Optimisation</b> (facultatif) : cherchez la matière inutile sous le même cas de charge, en visant une quantité de matière ou un facteur de sécurité.</li></ol>
+    <h3>Déroulement</h3><ol><li><b>Modèle</b> : importez le STL de la pièce, vérifiez les dimensions et choisissez le matériau.</li><li><b>Maillage</b> : réglez la taille d'élément et générez le maillage.</li><li><b>Étude</b> : cliquez les faces dans la vue, puis créez les appuis et les forces (panneau de droite).</li><li><b>Calculer</b>, puis lisez le bilan dans <b>Résultats</b>.</li><li><b>Zones conservées</b> (facultatif, onglet Étude) : faces dont la matière doit rester en place pendant l'optimisation, sur une épaisseur réglable (un trou entier, une face d'appui…).</li><li><b>Optimisation</b> (facultatif) : cherchez la matière inutile sous le même cas de charge, en visant une quantité de matière ou un facteur de sécurité.</li></ol>
     <h3>Exporter depuis SolidWorks</h3><p>Fichier › Enregistrer sous › STL (*.stl). Dans Options : unité « Millimètres », résolution « Fine ». Une résolution fine donne des alésages plus ronds et des sélections de faces plus propres.</p>
     <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>Deux maillages au choix : des cubes coupés par la vraie surface (robuste, sert aussi à l'optimisation), ou des tétraèdres à 10 nœuds (plus précis à nombre d'éléments égal). Plus les éléments sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide et sans jeu, et la matière glisse autour de lui (ou non, avec l'option « Boulon serré »).</li></ul>
     <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis fixes et dans les angles rentrants vifs sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
