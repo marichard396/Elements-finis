@@ -600,6 +600,52 @@ const FEA = (function () {
     }
     return -1;
   }
+  /* Retire de u le pivotement en bloc autour du point p (rotation seule, moindres carrés) ; retourne la rotation retirée. */
+  function removeSpin(u, X, nn, p) {
+    const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], b = [0, 0, 0];
+    for (let n = 0; n < nn; n++) {
+      const rx = X[n * 3] - p[0], ry = X[n * 3 + 1] - p[1], rz = X[n * 3 + 2] - p[2], r2 = rx * rx + ry * ry + rz * rz, ux = u[n * 3], uy = u[n * 3 + 1], uz = u[n * 3 + 2];
+      A[0][0] += r2 - rx * rx; A[1][1] += r2 - ry * ry; A[2][2] += r2 - rz * rz; A[0][1] -= rx * ry; A[0][2] -= rx * rz; A[1][2] -= ry * rz;
+      b[0] += ry * uz - rz * uy; b[1] += rz * ux - rx * uz; b[2] += rx * uy - ry * ux;
+    }
+    A[1][0] = A[0][1]; A[2][0] = A[0][2]; A[2][1] = A[1][2];
+    const det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1]) - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0]) + A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]); if (!(Math.abs(det) > 0)) return [0, 0, 0];
+    const s = (c, v) => { const M = A.map(r => r.slice()); for (let i = 0; i < 3; i++) M[i][c] = v[i]; return M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]); };
+    const w = [s(0, b) / det, s(1, b) / det, s(2, b) / det];
+    for (let n = 0; n < nn; n++) { const rx = X[n * 3] - p[0], ry = X[n * 3 + 1] - p[1], rz = X[n * 3 + 2] - p[2]; u[n * 3] -= w[1] * rz - w[2] * ry; u[n * 3 + 1] -= w[2] * rx - w[0] * rz; u[n * 3 + 2] -= w[0] * ry - w[1] * rx; }
+    return w;
+  }
+
+  /* Centre de poussée exact d'une charge sur les triangles STL choisis (pondéré par l'aire, et par le cosinus
+     pour une charge de palier). */
+  function loadCentroid(tris, N, list, v, bearing) {
+    const m = Math.hypot(v[0], v[1], v[2]) || 1, c = [0, 0, 0]; let W = 0;
+    for (let pass = 0; pass < 2 && W === 0; pass++) for (const t of list) {
+      const i = t * 9; let wt = 1; if (bearing && pass === 0) { wt = -(v[0] * N[t * 3] + v[1] * N[t * 3 + 1] + v[2] * N[t * 3 + 2]) / m; if (wt <= 0) continue; }
+      const ux = tris[i + 3] - tris[i], uy = tris[i + 4] - tris[i + 1], uz = tris[i + 5] - tris[i + 2], vx = tris[i + 6] - tris[i], vy = tris[i + 7] - tris[i + 1], vz = tris[i + 8] - tris[i + 2];
+      const a = wt * 0.5 * Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx); W += a;
+      for (let k = 0; k < 3; k++) c[k] += a * (tris[i + k] + tris[i + 3 + k] + tris[i + 6 + k]) / 3;
+    }
+    return W > 0 ? c.map(x => x / W) : null;
+  }
+  /* Corrige légèrement les poids nodaux (somme = 1) pour que leur barycentre tombe sur le centre de poussée exact :
+     la force passe alors au bon endroit et le maillage n'ajoute aucun couple parasite. */
+  function balanceLoad(nodes, w, X, target) {
+    if (!target || nodes.length < 4) return w;
+    const m = [0, 0, 0]; for (let i = 0; i < nodes.length; i++) for (let k = 0; k < 3; k++) m[k] += w[i] * X[nodes[i] * 3 + k];
+    const C = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    for (let i = 0; i < nodes.length; i++) { const d = [0, 1, 2].map(k => X[nodes[i] * 3 + k] - m[k]); for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) C[a][b] += w[i] * d[a] * d[b]; }
+    const tr = C[0][0] + C[1][1] + C[2][2], eps = 1e-6 * tr + 1e-30; for (let a = 0; a < 3; a++) C[a][a] += eps;
+    const r = [0, 1, 2].map(k => target[k] - m[k]);
+    const det = C[0][0] * (C[1][1] * C[2][2] - C[1][2] * C[2][1]) - C[0][1] * (C[1][0] * C[2][2] - C[1][2] * C[2][0]) + C[0][2] * (C[1][0] * C[2][1] - C[1][1] * C[2][0]);
+    const inv = [[C[1][1] * C[2][2] - C[1][2] * C[2][1], C[0][2] * C[2][1] - C[0][1] * C[2][2], C[0][1] * C[1][2] - C[0][2] * C[1][1]], [C[1][2] * C[2][0] - C[1][0] * C[2][2], C[0][0] * C[2][2] - C[0][2] * C[2][0], C[0][2] * C[1][0] - C[0][0] * C[1][2]], [C[1][0] * C[2][1] - C[1][1] * C[2][0], C[0][1] * C[2][0] - C[0][0] * C[2][1], C[0][0] * C[1][1] - C[0][1] * C[1][0]]];
+    const g = [0, 1, 2].map(a => (inv[a][0] * r[0] + inv[a][1] * r[1] + inv[a][2] * r[2]) / det);
+    const out = new Float64Array(w.length); let S = 0, neg = false;
+    for (let i = 0; i < nodes.length; i++) { let f = 1; for (let k = 0; k < 3; k++) f += g[k] * (X[nodes[i] * 3 + k] - m[k]); if (f < 0.2) { f = 0.2; neg = true; } out[i] = w[i] * f; S += out[i]; }
+    for (let i = 0; i < out.length; i++) out[i] /= S;
+    return out;
+  }
+
   /* Charge répartie sur la vraie surface : chaque triangle est échantillonné, et chaque échantillon est reporté
      sur les 8 nœuds de sa cellule (charge nodale cohérente). bearing : seuls les endroits où la force pousse
      sur la matière sont chargés, avec un poids en cosinus. Retourne les nœuds et leurs poids (somme = 1). */
@@ -622,7 +668,7 @@ const FEA = (function () {
       }
     }
     const nodes = [], ws = []; if (W > 0) for (let nd = 0; nd < mesh.nn; nd++) if (acc[nd] > 0) { nodes.push(nd); ws.push(acc[nd] / W); }
-    return { nodes: Int32Array.from(nodes), w: Float64Array.from(ws) };
+    const nd = Int32Array.from(nodes); return { nodes: nd, w: balanceLoad(nd, Float64Array.from(ws), mesh.coords, loadCentroid(tris, N, list, v, bearing)) };
   }
 
   /* bcs : [{type:'fix'|'disp'|'pin'|'force', nodes, ...}]
@@ -830,7 +876,7 @@ const FEA = (function () {
     return { tris, holeL, holeR };
   }
 
-  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, surfaceLoad, surfaceInterp, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N, _i: { d2PointTri, CP, mgSetup, vcycle, buildBC } };
+  return { P, parseSTL, geomInfo, buildTopology, selectRegion, voxelize, buildMesh, extractFaces, hexKe, matvec, pcg, nodesNearTris, surfaceLoad, surfaceInterp, buildBC, solveContact, keepConnected, computeResults, topopt, demoLink, FACE_N, loadCentroid, balanceLoad, removeSpin, _i: { d2PointTri, CP, mgSetup, vcycle, buildBC } };
 })();
 if (typeof module !== 'undefined') module.exports = FEA;
 
@@ -865,7 +911,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
   }
 
   /* ---------- Mailleur ---------- */
-  let USE_ONCUT = false, OFFS = 1; const DBG = {};
+  let USE_ONCUT = false, OFFS = 1, FRS = [1], PRESNAP = 0.5; const DBG = {};
   function tetMesh(tris, h, hex, topo) {
     const gi = F.geomInfo(tris), n = [0, 0, 0], o = [0, 0, 0];
     /* treillis décalé d'une fraction quelconque de h : les faces planes de la pièce ne tombent pas sur ses plans */
@@ -931,25 +977,78 @@ if (typeof module !== 'undefined') module.exports = FEA;
     /* 3. état des sommets : -1 dedans, +1 dehors, 0 ramené sur la surface (à moins de 0,25 h) */
     const st = new Int8Array(NN), SNAP = 0.25 * h;
     for (let g = 0; g < NN; g++) st[g] = dist[g] < SNAP ? 0 : inside[g] ? -1 : 1;
+    /* 3b. arêtes vives et coins du modèle (angle entre faces > 30°) */
+    let seg = [], ns = 0, corners = [], sc = null, sl = null, Nn = null, cs = Math.cos(30 * Math.PI / 180);
+    const cellOf = (x, y, z) => Math.min(nx - 1, Math.max(0, Math.floor((x - ox) / h))) + nx * (Math.min(ny - 1, Math.max(0, Math.floor((y - oy) / h))) + ny * Math.min(nz - 1, Math.max(0, Math.floor((z - oz) / h))));
+    if (topo) {
+      const adj = topo.adj; Nn = topo.normals;
+      for (let t = 0; t < ntS; t++) for (let e2 = 0; e2 < 3; e2++) {
+        const o2 = adj[t * 3 + e2]; if (o2 >= 0 && (o2 < t || Nn[t * 3] * Nn[o2 * 3] + Nn[t * 3 + 1] * Nn[o2 * 3 + 1] + Nn[t * 3 + 2] * Nn[o2 * 3 + 2] > cs)) continue;
+        const a = t * 9 + e2 * 3, b = t * 9 + ((e2 + 1) % 3) * 3; seg.push(tris[a], tris[a + 1], tris[a + 2], tris[b], tris[b + 1], tris[b + 2]);
+      }
+      ns = seg.length / 6;
+        /* coins : extrémités où se rejoignent autre chose que 2 arêtes vives, ou 2 arêtes formant un angle marqué */
+        const ends = new Map(), inv = 1 / (1e-4 * h);
+        for (let q = 0; q < ns; q++) for (let w = 0; w < 2; w++) {
+          const x = seg[q * 6 + w * 3], y = seg[q * 6 + w * 3 + 1], z = seg[q * 6 + w * 3 + 2], key = Math.round(x * inv) + ',' + Math.round(y * inv) + ',' + Math.round(z * inv);
+          let l = Math.hypot(seg[q * 6 + 3] - seg[q * 6], seg[q * 6 + 4] - seg[q * 6 + 1], seg[q * 6 + 5] - seg[q * 6 + 2]) || 1; const sgn = w ? -1 : 1;
+          const dir = [(seg[q * 6 + 3] - seg[q * 6]) / l * sgn, (seg[q * 6 + 4] - seg[q * 6 + 1]) / l * sgn, (seg[q * 6 + 5] - seg[q * 6 + 2]) / l * sgn];
+          let en = ends.get(key); if (!en) { en = { p: [x, y, z], d: [] }; ends.set(key, en); } en.d.push(dir);
+        }
+        for (const en of ends.values()) { if (en.d.length !== 2) corners.push(en.p); else { const a = en.d[0], b = en.d[1]; if (-(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) < cs) corners.push(en.p); } }
+        sc = new Int32Array(nx * ny * nz + 1);
+        for (let pass = 0; pass < 2; pass++) {
+          for (let q = 0; q < ns; q++) {
+            const e3 = 1.25 * h, i0 = Math.max(0, Math.floor((Math.min(seg[q * 6], seg[q * 6 + 3]) - e3 - ox) / h)), i1 = Math.min(nx - 1, Math.floor((Math.max(seg[q * 6], seg[q * 6 + 3]) + e3 - ox) / h)), j0 = Math.max(0, Math.floor((Math.min(seg[q * 6 + 1], seg[q * 6 + 4]) - e3 - oy) / h)), j1 = Math.min(ny - 1, Math.floor((Math.max(seg[q * 6 + 1], seg[q * 6 + 4]) + e3 - oy) / h)), k0 = Math.max(0, Math.floor((Math.min(seg[q * 6 + 2], seg[q * 6 + 5]) - e3 - oz) / h)), k1 = Math.min(nz - 1, Math.floor((Math.max(seg[q * 6 + 2], seg[q * 6 + 5]) + e3 - oz) / h));
+            for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const c = i + nx * (j + ny * k); if (pass === 0) sc[c + 1]++; else sl[sc[c]++] = q; }
+          }
+          if (pass === 0) { for (let c = 0; c < nx * ny * nz; c++) sc[c + 1] += sc[c]; sl = new Int32Array(sc[nx * ny * nz]); }
+        }
+    }
+    /* 3c. les sommets du treillis posés sur la surface et proches d'un coin ou d'une arête vive y sont ramenés
+       avant de créer les éléments, pour que le tri des éléments se fasse avec leur position finale */
+    if (ns) {
+      const taken = new Uint8Array(NN);
+      for (const p of corners) {
+        const ci = Math.round((p[0] - ox) / h), cj = Math.round((p[1] - oy) / h), ck = Math.round((p[2] - oz) / h); let bd = 0.64 * h * h, bg = -1;
+        for (let k = Math.max(0, ck - 1); k <= Math.min(nz, ck + 1); k++) for (let j = Math.max(0, cj - 1); j <= Math.min(ny, cj + 1); j++) for (let i = Math.max(0, ci - 1); i <= Math.min(nx, ci + 1); i++) {
+          const g = i + mx * (j + my * k); if (st[g] !== 0 || taken[g]) continue; const dd = (ox + i * h - p[0]) ** 2 + (oy + j * h - p[1]) ** 2 + (oz + k * h - p[2]) ** 2; if (dd < bd) { bd = dd; bg = g; }
+        }
+        if (bg >= 0) { taken[bg] = 1; cpn[bg * 3] = p[0]; cpn[bg * 3 + 1] = p[1]; cpn[bg * 3 + 2] = p[2]; }
+      }
+      const lim = (PRESNAP * h) ** 2;
+      for (let g = 0; g < NN; g++) {
+        if (st[g] !== 0 || taken[g]) continue; const i = g % mx, j = ((g / mx) | 0) % my, k = (g / (mx * my)) | 0, x = ox + i * h, y = oy + j * h, z = oz + k * h, c = cellOf(x, y, z);
+        let best = lim, bx = 0, by = 0, bz = 0, ok = false;
+        for (let q = c ? sc[c - 1] : 0; q < sc[c]; q++) {
+          const s6 = sl[q] * 6, dx = seg[s6 + 3] - seg[s6], dy = seg[s6 + 4] - seg[s6 + 1], dz = seg[s6 + 5] - seg[s6 + 2], l2 = dx * dx + dy * dy + dz * dz || 1, t = Math.min(1, Math.max(0, ((x - seg[s6]) * dx + (y - seg[s6 + 1]) * dy + (z - seg[s6 + 2]) * dz) / l2));
+          const qx = seg[s6] + t * dx, qy = seg[s6 + 1] + t * dy, qz = seg[s6 + 2] + t * dz, dd = (x - qx) ** 2 + (y - qy) ** 2 + (z - qz) ** 2; if (dd < best) { best = dd; bx = qx; by = qy; bz = qz; ok = true; }
+        }
+        if (ok) { taken[g] = 1; cpn[g * 3] = bx; cpn[g * 3 + 1] = by; cpn[g * 3 + 2] = bz; }
+      }
+    }
     /* 4. tétraèdres */
-    const vid = new Int32Array(NN).fill(-1), V = [], T = [], SV = [], cutMap = new Map(); let nv = 0, dropped = 0;
+    const vid = new Int32Array(NN).fill(-1), V = [], RF = [], T = [], SV = [], cutMap = new Map(); let nv = 0, dropped = 0;
     const lat = (g, out) => { const i = g % mx, j = ((g / mx) | 0) % my, k = (g / (mx * my)) | 0; out[0] = ox + i * h; out[1] = oy + j * h; out[2] = oz + k * h; };
     const pa = [0, 0, 0], pb = [0, 0, 0];
-    const getV = g => { if (vid[g] < 0) { vid[g] = nv++; SV.push(st[g] === 0 ? 1 : 0); if (st[g] === 0) V.push(cpn[g * 3], cpn[g * 3 + 1], cpn[g * 3 + 2]); else { lat(g, pa); V.push(pa[0], pa[1], pa[2]); } } return vid[g]; };
+    const getV = g => { if (vid[g] < 0) { vid[g] = nv++; SV.push(st[g] === 0 ? 1 : 0); lat(g, pa); RF.push(pa[0], pa[1], pa[2]); if (st[g] === 0) V.push(cpn[g * 3], cpn[g * 3 + 1], cpn[g * 3 + 2]); else V.push(pa[0], pa[1], pa[2]); } return vid[g]; };
     const cutV = (gi_, go) => { /* point de coupe sur l'arête dedans → dehors, projeté sur la surface */
       const key = gi_ < go ? gi_ * NN + go : go * NN + gi_; let id = cutMap.get(key); if (id !== undefined) return id;
       lat(gi_, pa); lat(go, pb); const da = dist[gi_], db = dist[go], t = isFinite(da) && isFinite(db) ? da / (da + db) : 0.5;
-      let x = pa[0] + t * (pb[0] - pa[0]), y = pa[1] + t * (pb[1] - pa[1]), z = pa[2] + t * (pb[2] - pa[2]);
+      let x = pa[0] + t * (pb[0] - pa[0]), y = pa[1] + t * (pb[1] - pa[1]), z = pa[2] + t * (pb[2] - pa[2]); RF.push(x, y, z);
       if (nearest(x, y, z, 1) >= 0 && NEAR.d < 0.5 * h) { x = CP[0]; y = CP[1]; z = CP[2]; }
       id = nv++; SV.push(1); V.push(x, y, z); cutMap.set(key, id); return id;
     };
     const vmin = 1e-5 * h * h * h;
+    const vol6 = (P, a, b, c, d) => { const ax = P[a * 3], ay = P[a * 3 + 1], az = P[a * 3 + 2], ux = P[b * 3] - ax, uy = P[b * 3 + 1] - ay, uz = P[b * 3 + 2] - az, vx = P[c * 3] - ax, vy = P[c * 3 + 1] - ay, vz = P[c * 3 + 2] - az, wx = P[d * 3] - ax, wy = P[d * 3 + 1] - ay, wz = P[d * 3 + 2] - az; return (ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx)) / 6; };
+    /* l'orientation est lue sur le treillis d'origine (jamais retourné) ; un élément que le déplacement des sommets
+       aplatit ou retourne est écarté au lieu d'être remis à l'endroit (ce qui ferait se chevaucher deux éléments) */
     const emit = (a, b, c, d) => {
       if (a === b || a === c || a === d || b === c || b === d || c === d) return;
-      const ax = V[a * 3], ay = V[a * 3 + 1], az = V[a * 3 + 2], ux = V[b * 3] - ax, uy = V[b * 3 + 1] - ay, uz = V[b * 3 + 2] - az, vx = V[c * 3] - ax, vy = V[c * 3 + 1] - ay, vz = V[c * 3 + 2] - az, wx = V[d * 3] - ax, wy = V[d * 3 + 1] - ay, wz = V[d * 3 + 2] - az;
-      const vol = (ux * (vy * wz - vz * wy) - uy * (vx * wz - vz * wx) + uz * (vx * wy - vy * wx)) / 6;
-      if (Math.abs(vol) < vmin) { dropped++; return; }
-      if (vol > 0) T.push(a, b, c, d); else T.push(a, b, d, c);
+      const rv = vol6(RF, a, b, c, d); if (Math.abs(rv) < 1e-9 * h * h * h) { dropped++; return; }
+      const vol = vol6(V, a, b, c, d) * Math.sign(rv);
+      if (vol < vmin) { dropped++; return; }
+      if (rv > 0) T.push(a, b, c, d); else T.push(a, b, d, c);
     };
     const PR = [[0, 1, 2, 3, 4, 5], [1, 2, 0, 4, 5, 3], [2, 0, 1, 5, 3, 4], [3, 5, 4, 0, 2, 1], [4, 3, 5, 1, 0, 2], [5, 4, 3, 2, 1, 0]], pv = [0, 0, 0, 0, 0, 0];
     const prism = (a, b, c, d, e, f) => { /* base (a,b,c), dessus (d,e,f), arêtes a-d, b-e, c-f ; diagonales choisies par le plus petit numéro */
@@ -979,7 +1078,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
       /* sortie franche (arête vive) ou départ tangent (surface lisse) ? dans le second cas, la coupe reste le sommet */
       const dl = 0.12, s2 = at(Math.min(1, lo + dl)); if (s2 === null || s2 < 0.3 * Math.min(dl, 1 - lo) * L) { onMap.set(key, -1); return getV(gx); }
       let x = x0 + lo * dx, y = y0 + lo * dy, z = z0 + lo * dz; if (nearest(x, y, z, 1) >= 0 && NEAR.d < 0.3 * h) { x = CP[0]; y = CP[1]; z = CP[2]; }
-      id = nv++; SV.push(1); V.push(x, y, z); onMap.set(key, id); return id;
+      id = nv++; SV.push(1); RF.push(x, y, z); V.push(x, y, z); onMap.set(key, id); return id;
     };
     const cp = (gx, go) => st[gx] === 0 ? (USE_ONCUT ? onCut(gx, go) : getV(gx)) : cutV(gx, go);
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
@@ -1004,23 +1103,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     /* 4b. arêtes vives : les sommets de surface proches d'une arête vive (ou d'un coin) du modèle y sont ramenés,
        à condition qu'aucun tétraèdre voisin ne s'aplatisse */
     let nFeat = 0;
-    if (topo) {
-      const adj = topo.adj, Nn = topo.normals, cs = Math.cos(30 * Math.PI / 180), seg = [];
-      for (let t = 0; t < ntS; t++) for (let e2 = 0; e2 < 3; e2++) {
-        const o2 = adj[t * 3 + e2]; if (o2 >= 0 && (o2 < t || Nn[t * 3] * Nn[o2 * 3] + Nn[t * 3 + 1] * Nn[o2 * 3 + 1] + Nn[t * 3 + 2] * Nn[o2 * 3 + 2] > cs)) continue;
-        const a = t * 9 + e2 * 3, b = t * 9 + ((e2 + 1) % 3) * 3; seg.push(tris[a], tris[a + 1], tris[a + 2], tris[b], tris[b + 1], tris[b + 2]);
-      }
-      const ns = seg.length / 6;
-      if (ns) {
-        /* coins : extrémités où se rejoignent autre chose que 2 arêtes vives, ou 2 arêtes formant un angle marqué */
-        const ends = new Map(), inv = 1 / (1e-4 * h), corners = [];
-        for (let q = 0; q < ns; q++) for (let w = 0; w < 2; w++) {
-          const x = seg[q * 6 + w * 3], y = seg[q * 6 + w * 3 + 1], z = seg[q * 6 + w * 3 + 2], key = Math.round(x * inv) + ',' + Math.round(y * inv) + ',' + Math.round(z * inv);
-          let l = Math.hypot(seg[q * 6 + 3] - seg[q * 6], seg[q * 6 + 4] - seg[q * 6 + 1], seg[q * 6 + 5] - seg[q * 6 + 2]) || 1; const sgn = w ? -1 : 1;
-          const dir = [(seg[q * 6 + 3] - seg[q * 6]) / l * sgn, (seg[q * 6 + 4] - seg[q * 6 + 1]) / l * sgn, (seg[q * 6 + 5] - seg[q * 6 + 2]) / l * sgn];
-          let en = ends.get(key); if (!en) { en = { p: [x, y, z], d: [] }; ends.set(key, en); } en.d.push(dir);
-        }
-        for (const en of ends.values()) { if (en.d.length !== 2) corners.push(en.p); else { const a = en.d[0], b = en.d[1]; if (-(a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) < cs) corners.push(en.p); } }
+    if (topo && ns) {
         /* incidence sommet -> tétraèdres */
         const icnt = new Int32Array(nv + 1); for (let q = 0; q < T.length; q++) icnt[T[q] + 1]++; for (let v = 0; v < nv; v++) icnt[v + 1] += icnt[v];
         const inc = new Int32Array(T.length), ipos = icnt.slice(0, nv); for (let q = 0; q < T.length; q++) inc[ipos[T[q]]++] = q >> 2;
@@ -1033,7 +1116,6 @@ if (typeof module !== 'undefined') module.exports = FEA;
           moved[v] = 1; nFeat++; return true;
         };
         /* coins d'abord : sommet de surface le plus proche */
-        const cellOf = (x, y, z) => Math.min(nx - 1, Math.max(0, Math.floor((x - ox) / h))) + nx * (Math.min(ny - 1, Math.max(0, Math.floor((y - oy) / h))) + ny * Math.min(nz - 1, Math.max(0, Math.floor((z - oz) / h))));
         const vb = new Map(); for (let v = 0; v < nv; v++) if (SV[v]) { const c = cellOf(V[v * 3], V[v * 3 + 1], V[v * 3 + 2]); let a = vb.get(c); if (!a) vb.set(c, a = []); a.push(v); }
         for (const p of corners) {
           const ci = Math.min(nx - 1, Math.max(0, Math.floor((p[0] - ox) / h))), cj = Math.min(ny - 1, Math.max(0, Math.floor((p[1] - oy) / h))), ck = Math.min(nz - 1, Math.max(0, Math.floor((p[2] - oz) / h))); const cand = [];
@@ -1041,14 +1123,6 @@ if (typeof module !== 'undefined') module.exports = FEA;
           cand.sort((a, b) => a[0] - b[0]); for (const c of cand) if (tryMove(c[1], p[0], p[1], p[2])) break;
         }
         /* puis les arêtes : segments rangés par case */
-        const sc = new Int32Array(nx * ny * nz + 1); let sl = null;
-        for (let pass = 0; pass < 2; pass++) {
-          for (let q = 0; q < ns; q++) {
-            const e3 = 1.25 * h, i0 = Math.max(0, Math.floor((Math.min(seg[q * 6], seg[q * 6 + 3]) - e3 - ox) / h)), i1 = Math.min(nx - 1, Math.floor((Math.max(seg[q * 6], seg[q * 6 + 3]) + e3 - ox) / h)), j0 = Math.max(0, Math.floor((Math.min(seg[q * 6 + 1], seg[q * 6 + 4]) - e3 - oy) / h)), j1 = Math.min(ny - 1, Math.floor((Math.max(seg[q * 6 + 1], seg[q * 6 + 4]) + e3 - oy) / h)), k0 = Math.max(0, Math.floor((Math.min(seg[q * 6 + 2], seg[q * 6 + 5]) - e3 - oz) / h)), k1 = Math.min(nz - 1, Math.floor((Math.max(seg[q * 6 + 2], seg[q * 6 + 5]) + e3 - oz) / h));
-            for (let k = k0; k <= k1; k++) for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const c = i + nx * (j + ny * k); if (pass === 0) sc[c + 1]++; else sl[sc[c]++] = q; }
-          }
-          if (pass === 0) { for (let c = 0; c < nx * ny * nz; c++) sc[c + 1] += sc[c]; sl = new Int32Array(sc[nx * ny * nz]); }
-        }
         const lim2 = (0.5 * h) ** 2, cands = [];
         for (let v = 0; v < nv; v++) {
           if (!SV[v] || moved[v]) continue; const x = V[v * 3], y = V[v * 3 + 1], z = V[v * 3 + 2], c = cellOf(x, y, z); let best = lim2, bx = 0, by = 0, bz = 0, ok = false;
@@ -1093,7 +1167,13 @@ if (typeof module !== 'undefined') module.exports = FEA;
               if (moved[a] || moved[b]) { DBG.wild = (DBG.wild || 0) + 1; continue; } const key = a * nvc + b; if (done.has(key)) continue; done.add(key);
               const ta = nrmOf(a), tb2 = nrmOf(b); if (ta < 0 || tb2 < 0 || Nn[ta * 3] * Nn[tb2 * 3] + Nn[ta * 3 + 1] * Nn[tb2 * 3 + 1] + Nn[ta * 3 + 2] * Nn[tb2 * 3 + 2] > cs) continue;
               const mx_ = (V[a * 3] + V[b * 3]) / 2, my_ = (V[a * 3 + 1] + V[b * 3 + 1]) / 2, mz_ = (V[a * 3 + 2] + V[b * 3 + 2]) / 2;
-              DBG.strad = (DBG.strad || 0) + 1; if (!segNear(mx_, my_, mz_, np3)) { DBG.noseg = (DBG.noseg || 0) + 1; continue; }
+              DBG.strad = (DBG.strad || 0) + 1;
+              /* point de l'arête vive le plus proche de l'arête du maillage (et non de son seul milieu) */
+              let bestD = Infinity, fx = 0, fy = 0, fz = 0;
+              for (let k = 1; k <= 9; k++) { const t = k / 10, x = V[a * 3] + t * (V[b * 3] - V[a * 3]), y = V[a * 3 + 1] + t * (V[b * 3 + 1] - V[a * 3 + 1]), z = V[a * 3 + 2] + t * (V[b * 3 + 2] - V[a * 3 + 2]);
+                if (!segNear(x, y, z, np3)) continue; const dd = (np3[0] - x) ** 2 + (np3[1] - y) ** 2 + (np3[2] - z) ** 2; if (dd < bestD) { bestD = dd; fx = np3[0]; fy = np3[1]; fz = np3[2]; } }
+              if (bestD === Infinity) { DBG.noseg = (DBG.noseg || 0) + 1; continue; }
+              np3[0] = fx; np3[1] = fy; np3[2] = fz;
               /* tétraèdres autour de l'arête */
               const around = []; let free = true;
               /* un tétraèdre déjà scindé dans cette passe autour de a ou de b : on attend la passe suivante */
@@ -1102,20 +1182,61 @@ if (typeof module !== 'undefined') module.exports = FEA;
               if (!free) { done.delete(key); continue; }
               if (!free || !around.length) continue;
               /* validité : chaque moitié doit garder un volume positif */
-              const m = V.length / 3; V.push(np3[0], np3[1], np3[2]); T.push(0, 0, 0, 0); const tmp = T.length / 4 - 1; let ok = true;
-              for (const t of around) {
-                for (let w = 0; w < 2 && ok; w++) { for (let q = 0; q < 4; q++) { const v = T[t * 4 + q]; T[tmp * 4 + q] = v === (w ? a : b) ? m : v; } if (!(volOf(tmp) > 1e-4 * h * h * h)) ok = false; }
-                if (!ok) break;
+              /* nouveau sommet sur l'arête vive ; si cela retourne un élément, on l'avance seulement d'une partie du chemin */
+              const m = V.length / 3; V.push(np3[0], np3[1], np3[2]); T.push(0, 0, 0, 0); const tmp = T.length / 4 - 1; let ok = false;
+              for (const fr of FRS) {
+                V[m * 3] = mx_ + fr * (np3[0] - mx_); V[m * 3 + 1] = my_ + fr * (np3[1] - my_); V[m * 3 + 2] = mz_ + fr * (np3[2] - mz_); ok = true;
+                for (const t of around) {
+                  for (let w = 0; w < 2 && ok; w++) { for (let q = 0; q < 4; q++) { const v = T[t * 4 + q]; T[tmp * 4 + q] = v === (w ? a : b) ? m : v; } if (!(volOf(tmp) > 1e-4 * h * h * h)) ok = false; }
+                  if (!ok) break;
+                }
+                if (ok) { np3[0] = V[m * 3]; np3[1] = V[m * 3 + 1]; np3[2] = V[m * 3 + 2]; break; }
               }
               T.length -= 4;
               if (!ok) { V.length -= 3; DBG.invalid = (DBG.invalid || 0) + 1; continue; }
-              SV.push(1); moved.push(1); nv++;
+              SV.push(1); moved.push(1); RF.push(np3[0], np3[1], np3[2]); nv++;
               for (const t of around) { busy[t] = 1; const q0 = T.length; T.push(T[t * 4], T[t * 4 + 1], T[t * 4 + 2], T[t * 4 + 3]); for (let q = 0; q < 4; q++) { if (T[t * 4 + q] === b) T[t * 4 + q] = m; if (T[q0 + q] === a) T[q0 + q] = m; } }
               nsplit++; nFeat++;
             }
           }
           if (!nsplit) break;
         }
+    }
+    /* 4c. comblement des encoches : là où deux faces de bord voisines forment un creux alors que la vraie pièce
+       est pleine à cet endroit (centre du creux dans la matière), on ajoute le tétraèdre qui le referme */
+    let nFill = 0;
+    {
+      const FVb = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]];
+      for (let pass = 0; pass < 10; pass++) {
+        const ntc = T.length / 4; let sz = 1; while (sz < ntc * 8) sz <<= 1; const mk = sz - 1, tb = new Int32Array(sz).fill(-1), mt = new Uint8Array(ntc * 4), k3 = new Int32Array(ntc * 12);
+        for (let f = 0; f < ntc * 4; f++) {
+          const t = f >> 2, l = FVb[f & 3]; let a = T[t * 4 + l[0]], b = T[t * 4 + l[1]], c = T[t * 4 + l[2]], w;
+          if (a > b) { w = a; a = b; b = w; } if (b > c) { w = b; b = c; c = w; } if (a > b) { w = a; a = b; b = w; }
+          k3[f * 3] = a; k3[f * 3 + 1] = b; k3[f * 3 + 2] = c; let p = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663) ^ Math.imul(c, 83492791)) & mk;
+          for (; ;) { const q = tb[p]; if (q < 0) { tb[p] = f; break; } if (k3[q * 3] === a && k3[q * 3 + 1] === b && k3[q * 3 + 2] === c && !mt[q]) { mt[q] = 1; mt[f] = 1; break; } p = (p + 1) & mk; }
+        }
+        /* arêtes de bord -> les deux faces de bord qui la partagent (sommets dans l'ordre sortant) */
+        const eF = new Map(), nvc = V.length / 3;
+        for (let f = 0; f < ntc * 4; f++) {
+          if (mt[f]) continue; const t = f >> 2, l = FVb[f & 3], v0 = T[t * 4 + l[0]], v1 = T[t * 4 + l[1]], v2 = T[t * 4 + l[2]];
+          for (const [p, q, r] of [[v0, v1, v2], [v1, v2, v0], [v2, v0, v1]]) { const key = p < q ? p * nvc + q : q * nvc + p; let e = eF.get(key); if (!e) eF.set(key, e = []); e.push(p, q, r, f); }
+        }
+        const used = new Uint8Array(ntc * 4); let added = 0;
+        for (const e of eF.values()) {
+          if (e.length !== 8) continue; const p = e[0], q = e[1], r = e[2], s2 = e[6]; if (e[4] !== q || e[5] !== p || r === s2 || used[e[3]] || used[e[7]]) continue;
+          /* creux : le sommet s2 de la deuxième face est du côté extérieur de la première */
+          const ux = V[q * 3] - V[p * 3], uy = V[q * 3 + 1] - V[p * 3 + 1], uz = V[q * 3 + 2] - V[p * 3 + 2], vx = V[r * 3] - V[p * 3], vy = V[r * 3 + 1] - V[p * 3 + 1], vz = V[r * 3 + 2] - V[p * 3 + 2];
+          const nx_ = uy * vz - uz * vy, ny_ = uz * vx - ux * vz, nz_ = ux * vy - uy * vx, nl = Math.hypot(nx_, ny_, nz_) || 1;
+          if (((V[s2 * 3] - V[p * 3]) * nx_ + (V[s2 * 3 + 1] - V[p * 3 + 1]) * ny_ + (V[s2 * 3 + 2] - V[p * 3 + 2]) * nz_) / nl < 0.02 * h) continue;
+          const lrs = Math.hypot(V[r * 3] - V[s2 * 3], V[r * 3 + 1] - V[s2 * 3 + 1], V[r * 3 + 2] - V[s2 * 3 + 2]); if (lrs > 1.8 * h) continue;
+          const v6 = vol6(V, p, q, r, s2); if (Math.abs(v6) < 2e-3 * h * h * h) continue;
+          const cx = (V[p * 3] + V[q * 3] + V[r * 3] + V[s2 * 3]) / 4, cy = (V[p * 3 + 1] + V[q * 3 + 1] + V[r * 3 + 1] + V[s2 * 3 + 1]) / 4, cz = (V[p * 3 + 2] + V[q * 3 + 2] + V[r * 3 + 2] + V[s2 * 3 + 2]) / 4;
+          const sc0 = sdf(cx, cy, cz); if (sc0 === null || sc0 > -0.01 * h) continue;
+          const sm = sdf((V[r * 3] + V[s2 * 3]) / 2, (V[r * 3 + 1] + V[s2 * 3 + 1]) / 2, (V[r * 3 + 2] + V[s2 * 3 + 2]) / 2); if (sm === null || sm > Math.max(0.05 * h, 0.1 * lrs)) continue; /* une corde d'arc dépasse un peu dans le vide */
+          if (v6 > 0) T.push(p, q, r, s2); else T.push(p, q, s2, r);
+          used[e[3]] = used[e[7]] = 1; added++; nFill++;
+        }
+        if (!added) break;
       }
     }
     let nt = T.length / 4;
@@ -1192,7 +1313,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
       for (let q = 0; q < 4; q++) { const det = isoGrad(GP[q][1], GP[q][2], GP[q][3]); for (let a = 0; a < 30; a++) cg.push(DN[a]); cg.push(det / 24); v2 += det / 24; }
       vtot += v2 - vol[t]; vol[t] = v2;
     }
-    const tm = { h, nt: ntk, nn, nv: nvk, tets, coords, grads, vol, vtot, cidx, cgp: Float64Array.from(cg), ncv, nFeat, bfaces: Int32Array.from(bf), nbf: btri.length, btri: Int32Array.from(btri), dropped, qmin };
+    const tm = { h, nt: ntk, nn, nv: nvk, tets, coords, grads, vol, vtot, cidx, cgp: Float64Array.from(cg), ncv, nFeat, nFill, bfaces: Int32Array.from(bf), nbf: btri.length, btri: Int32Array.from(btri), dropped, qmin };
     if (hex) linkHex(tm, hex);
     return tm;
   }
@@ -1320,7 +1441,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
 
   /* ---------- Conditions aux limites sur les faces de bord ----------
      specs : [{type, tris:[triangles STL], v, bearing, stick}] ; N = normales des triangles STL */
-  function tetBCs(tm, N, ntS, specs) {
+  function tetBCs(tm, N, ntS, specs, tris) {
     const { bfaces, nbf, btri, coords } = tm, out = [], mark = new Uint8Array(ntS);
     for (const s of specs) {
       mark.fill(0); for (const t of s.tris) mark[t] = 1;
@@ -1340,8 +1461,8 @@ if (typeof module !== 'undefined') module.exports = FEA;
       }
       const nodes = Int32Array.from(acc.keys()), w = new Float64Array(nodes.length), normals = new Float32Array(nodes.length * 3); let W = 0, i = 0;
       for (const a of acc.values()) { w[i] = a[0]; W += a[0]; const l = Math.hypot(a[1], a[2], a[3]) || 1; normals[i * 3] = a[1] / l; normals[i * 3 + 1] = a[2] / l; normals[i * 3 + 2] = a[3] / l; i++; }
-      if (s.type === 'force' && W > 0) for (let k = 0; k < w.length; k++) w[k] /= W;
-      out.push({ type: s.type, nodes, w, normals, v: s.v, stick: !!s.stick });
+      let wb = w; if (s.type === 'force' && W > 0) { for (let k = 0; k < w.length; k++) w[k] /= W; if (tris) wb = F.balanceLoad(nodes, w, coords, F.loadCentroid(tris, N, s.tris, s.v, !!s.bearing)); }
+      out.push({ type: s.type, nodes, w: wb, normals, v: s.v, stick: !!s.stick });
     }
     return out;
   }
@@ -1424,7 +1545,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     return { u, vmN, dN, maxD, maxVm, p99 };
   }
 
-  F.tet = { set: (a, b) => { USE_ONCUT = a; OFFS = b; }, DBG, tetMesh, linkHex, tetMatvec, tetPcg, tetBCs, assemble, tetSolve, tetResults };
+  F.tet = { set: (a, b, frs, ps) => { USE_ONCUT = a; OFFS = b; if (frs) FRS = frs; if (ps) PRESNAP = ps; }, DBG, tetMesh, linkHex, tetMatvec, tetPcg, tetBCs, assemble, tetSolve, tetResults };
 })(typeof FEA !== 'undefined' ? FEA : require('./engine.js'));
 </script>
 <script>
@@ -1818,7 +1939,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     }
     let tet = null;
     if (S.elType === 'tet') {
-      tet = FEA.tet.tetBCs(m.tet, N, S.surf.nt, S.bcs.map(b => ({ type: b.type, tris: b.tris, bearing: !!b.bearing, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v })));
+      tet = FEA.tet.tetBCs(m.tet, N, S.surf.nt, S.bcs.map(b => ({ type: b.type, tris: b.tris, bearing: !!b.bearing, stick: !!b.stick, v: b.type === 'disp' ? b.v.map((v, i) => b.free[i] ? null : v) : b.v })), S.tris);
       for (let i = 0; i < tet.length; i++) if (!tet[i].nodes.length) { toast('« ' + S.bcs[i].name + ' » ne touche aucune face du maillage. Affinez le maillage.'); return null; }
     }
     return { nu: S.mat.nu, kpen: 4 * S.mat.E * m.h, list, tet, pins: list.some(b => b.type === 'pin') };
@@ -1881,9 +2002,17 @@ onmessage = async e => {
     setProg(false); S.busy = false;
     if (r.cancelled) { toast('Calcul arrêté.', true); ui(); return; }
     if (!r.converged) { toast('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.'); ui(); return; }
+    /* un seul axe comme unique appui : la pièce est une articulation et peut pivoter en bloc autour de lui ;
+       ce pivotement (sans effet sur les contraintes) est retiré du déplacement affiché */
+    const sup = p.list.filter(b => b.type !== 'force'); let spin = null;
+    if (sup.length === 1 && sup[0].type === 'pin') {
+      const X = tet ? m.tet.coords : m.coords, nn = tet ? m.tet.nn : m.nn, pn = tet ? p.tet.find(b => b.type === 'pin').nodes : sup[0].nodes, c = [0, 0, 0];
+      for (const n of pn) for (let k = 0; k < 3; k++) c[k] += X[n * 3 + k] / pn.length;
+      const w = FEA.removeSpin(r.u, X, nn, c); spin = Math.hypot(w[0], w[1], w[2]);
+    }
     if (tet) { S.res = FEA.tet.tetResults(m.tet, S.mat.E, S.mat.nu, r.u); S.res.tet = m.tet; }
     else { S.res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.u); const dm = displayMesh(), si = FEA.surfaceInterp(m, dm.P, dm.N, S.res); S.res.sv = si.vm; S.res.sd = si.disp; }
-    S.res.auto = S.res.maxD ? 0.05 * Math.hypot(...S.gi.size) / S.res.maxD : 0; S.res.iter = r.iter; S.res.rounds = p.pins ? r.rounds : 0; S.res.time = (performance.now() - t0) / 1000;
+    S.res.auto = S.res.maxD ? 0.05 * Math.hypot(...S.gi.size) / S.res.maxD : 0; S.res.iter = r.iter; S.res.spin = spin; S.res.rounds = p.pins ? r.rounds : 0; S.res.time = (performance.now() - t0) / 1000;
     S.stale = false; S.tab = 'results'; resBuffers(); ui();
   }
   /* analyse de contrôle de la forme optimisée (éléments conservés seulement) */
@@ -2063,7 +2192,7 @@ onmessage = async e => {
     <div class="sec">AFFICHAGE</div><div class="seg full"><button data-res="vm" class="${S.resField === 'vm' ? 'on' : ''}">von Mises</button><button data-res="disp" class="${S.resField === 'disp' ? 'on' : ''}">Déplacement</button><button data-res="fs" class="${S.resField === 'fs' ? 'on' : ''}">Sécurité</button></div>
     <div class="row" style="margin-top:12px"><span><input type="checkbox" data-set="showDef" ${S.showDef ? 'checked' : ''}> Afficher la déformée</span></div>
     <div class="row"><span>Amplification (× auto)</span>${num('defMult', S.defMult, 0.5)}</div>
-    <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.<br><br>${r.tet ? fmt(r.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'} · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
+    <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.${r.spin !== null && r.spin !== undefined ? '<br><br>Un seul axe tient la pièce : c\'est une articulation, et rien d\'autre ne l\'empêche de pivoter en bloc autour de lui. Ce pivotement (' + fmt(r.spin * 180 / Math.PI, 2) + '°) est retiré du déplacement et de la déformée affichés ; il n\'a aucun effet sur les contraintes. Si la pièce est tenue autrement en réalité, ajoutez cet appui.' : ''}<br><br>${r.tet ? fmt(r.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'} · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
   }
   function panelOpt() {
     if (!S.tris) return `<div class="sec">OPTIMISATION TOPOLOGIQUE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
