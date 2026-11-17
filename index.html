@@ -933,6 +933,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
   }
 
   /* ---------- Mailleur ---------- */
+  const PCGP = { deg: 2, al: 6, hmean: 'arith', p1: true };
   let USE_ONCUT = false, OFFS = 1, FRS = [1], PRESNAP = 0.5; const DBG = {};
   function tetMesh(tris, h, hex, topo) {
     const gi = F.geomInfo(tris), n = [0, 0, 0], o = [0, 0, 0];
@@ -1359,11 +1360,9 @@ if (typeof module !== 'undefined') module.exports = FEA;
 
   /* ---------- Opérateur : y = K·x (tétraèdres quadratiques, 4 points de Gauss, sans matrice stockée) ---------- */
   const U = new Float64Array(30), FE = new Float64Array(30), AK = new Float64Array(12), SK = new Float64Array(12);
-  function tetMatvec(tm, lam, mu, x, y, nb) {
-    const { nt, tets, grads, vol, cidx, cgp } = tm; y.fill(0);
-    for (let e = 0; e < nt; e++) {
-      const b = e * 10, g = e * 12, wq = vol[e] / 4;
-      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; U[a * 3] = x[n]; U[a * 3 + 1] = x[n + 1]; U[a * 3 + 2] = x[n + 2]; }
+  /* FE = K_e · U pour l'élément e (U déjà rempli) */
+  function elemKu(tm, e, lam, mu) {
+    const { grads, vol, cidx, cgp } = tm, g = e * 12, wq = vol[e] / 4;
       FE.fill(0);
       const ci = cidx[e];
       if (ci >= 0) for (let q = 0; q < 4; q++) { /* élément courbe : gradients stockés */
@@ -1389,7 +1388,15 @@ if (typeof module !== 'undefined') module.exports = FEA;
           for (let j = k + 1; j < 4; j++) { const m = MID[k][j] * 3, ck = 4 * L[k], cj = 4 * L[j]; FE[m] += ck * SK[j * 3] + cj * SK[k * 3]; FE[m + 1] += ck * SK[j * 3 + 1] + cj * SK[k * 3 + 1]; FE[m + 2] += ck * SK[j * 3 + 2] + cj * SK[k * 3 + 2]; }
         }
       }
-      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; y[n] += FE[a * 3]; y[n + 1] += FE[a * 3 + 1]; y[n + 2] += FE[a * 3 + 2]; }
+  }
+  /* esc (facultatif) : coefficient de rigidité par élément (densité de l'optimisation) */
+  function tetMatvec(tm, lam, mu, x, y, nb, esc) {
+    const { nt, tets } = tm; y.fill(0);
+    for (let e = 0; e < nt; e++) {
+      const b = e * 10, s = esc ? esc[e] : 1; if (s === 0) continue;
+      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; U[a * 3] = x[n]; U[a * 3 + 1] = x[n + 1]; U[a * 3 + 2] = x[n + 2]; }
+      elemKu(tm, e, lam, mu);
+      for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; y[n] += s * FE[a * 3]; y[n + 1] += s * FE[a * 3 + 1]; y[n + 2] += s * FE[a * 3 + 2]; }
     }
     if (nb) for (let n = 0, nn = tm.nn; n < nn; n++) {
       const q = n * 6; if (nb[q] === 0 && nb[q + 1] === 0 && nb[q + 2] === 0) continue;
@@ -1397,60 +1404,121 @@ if (typeof module !== 'undefined') module.exports = FEA;
       y[n * 3] += nb[q] * x0 + nb[q + 3] * x1 + nb[q + 5] * x2; y[n * 3 + 1] += nb[q + 3] * x0 + nb[q + 1] * x1 + nb[q + 4] * x2; y[n * 3 + 2] += nb[q + 5] * x0 + nb[q + 4] * x1 + nb[q + 2] * x2;
     }
   }
-  function tetDiag(tm, lam, mu, D, nb) {
+  function tetDiag(tm, lam, mu, D, nb, esc) {
     const { nt, tets, grads, vol } = tm, dN = new Float64Array(30);
     for (let e = 0; e < nt; e++) {
-      const b = e * 10, g = e * 12, ci = tm.cidx[e]; let wq = vol[e] / 4;
+      const b = e * 10, g = e * 12, ci = tm.cidx[e], se = esc ? esc[e] : 1; if (se === 0) continue; let wq = vol[e] / 4;
       for (let q = 0; q < 4; q++) {
         const L = GP[q];
         if (ci >= 0) { const o = ci * 124 + q * 31; for (let a = 0; a < 30; a++) dN[a] = tm.cgp[o + a]; wq = tm.cgp[o + 30]; }
         else for (let k = 0; k < 4; k++) { const c = 4 * L[k] - 1; dN[k * 3] = c * grads[g + k * 3]; dN[k * 3 + 1] = c * grads[g + k * 3 + 1]; dN[k * 3 + 2] = c * grads[g + k * 3 + 2];
           for (let j = k + 1; j < 4; j++) { const m = MID[k][j] * 3; for (let c2 = 0; c2 < 3; c2++) dN[m + c2] = 4 * (L[k] * grads[g + j * 3 + c2] + L[j] * grads[g + k * 3 + c2]); } }
-        for (let a = 0; a < 10; a++) { const s = dN[a * 3] ** 2 + dN[a * 3 + 1] ** 2 + dN[a * 3 + 2] ** 2, n = tets[b + a] * 3; for (let c = 0; c < 3; c++) D[n + c] += wq * ((lam + mu) * dN[a * 3 + c] ** 2 + mu * s); }
+        for (let a = 0; a < 10; a++) { const s = dN[a * 3] ** 2 + dN[a * 3 + 1] ** 2 + dN[a * 3 + 2] ** 2, n = tets[b + a] * 3; for (let c = 0; c < 3; c++) D[n + c] += se * wq * ((lam + mu) * dN[a * 3 + c] ** 2 + mu * s); }
       }
     }
     if (nb) for (let n = 0; n < tm.nn; n++) for (let c = 0; c < 3; c++) D[n * 3 + c] += nb[n * 6 + c];
   }
 
+
+  /* ---------- Niveau intermédiaire : les mêmes tétraèdres, linéaires (4 sommets), pour le préconditionneur ---------- */
+  function p1Data(tm) {
+    if (tm.p1) return tm.p1;
+    const nv = tm.nv, nn = tm.nn, T = tm.tets, ma = new Int32Array(nn - nv), mb = new Int32Array(nn - nv);
+    for (let e = 0; e < tm.nt; e++) for (let q = 0; q < 6; q++) { const m = T[e * 10 + 4 + q] - nv; ma[m] = T[e * 10 + EDG[q][0]]; mb[m] = T[e * 10 + EDG[q][1]]; }
+    return (tm.p1 = { ma, mb });
+  }
+  function p1Matvec(tm, lam, mu, x, y, nb1, esc) {
+    const T = tm.tets, G = tm.grads, vol = tm.vol; y.fill(0);
+    for (let e = 0; e < tm.nt; e++) {
+      const s = (esc ? esc[e] : 1) * vol[e]; if (s === 0) continue; const g = e * 12, b = e * 10;
+      let G00 = 0, G01 = 0, G02 = 0, G10 = 0, G11 = 0, G12 = 0, G20 = 0, G21 = 0, G22 = 0;
+      for (let k = 0; k < 4; k++) { const n = T[b + k] * 3, u0 = x[n], u1 = x[n + 1], u2 = x[n + 2], gx = G[g + k * 3], gy = G[g + k * 3 + 1], gz = G[g + k * 3 + 2]; G00 += u0 * gx; G01 += u0 * gy; G02 += u0 * gz; G10 += u1 * gx; G11 += u1 * gy; G12 += u1 * gz; G20 += u2 * gx; G21 += u2 * gy; G22 += u2 * gz; }
+      const tr = lam * (G00 + G11 + G22) * s, m2 = mu * s, sxx = tr + 2 * m2 * G00, syy = tr + 2 * m2 * G11, szz = tr + 2 * m2 * G22, sxy = m2 * (G01 + G10), syz = m2 * (G12 + G21), szx = m2 * (G02 + G20);
+      for (let k = 0; k < 4; k++) { const n = T[b + k] * 3, gx = G[g + k * 3], gy = G[g + k * 3 + 1], gz = G[g + k * 3 + 2]; y[n] += sxx * gx + sxy * gy + szx * gz; y[n + 1] += sxy * gx + syy * gy + syz * gz; y[n + 2] += szx * gx + syz * gy + szz * gz; }
+    }
+    if (nb1) for (let n = 0; n < tm.nv; n++) for (let c = 0; c < 3; c++) y[n * 3 + c] += nb1[n * 3 + c] * x[n * 3 + c];
+  }
+  function p1Diag(tm, lam, mu, D, nb1, esc) {
+    const T = tm.tets, G = tm.grads, vol = tm.vol;
+    for (let e = 0; e < tm.nt; e++) { const s = (esc ? esc[e] : 1) * vol[e]; if (s === 0) continue; const g = e * 12;
+      for (let k = 0; k < 4; k++) { const n = T[e * 10 + k] * 3, gx = G[g + k * 3], gy = G[g + k * 3 + 1], gz = G[g + k * 3 + 2], g2 = gx * gx + gy * gy + gz * gz; D[n] += s * ((lam + mu) * gx * gx + mu * g2); D[n + 1] += s * ((lam + mu) * gy * gy + mu * g2); D[n + 2] += s * ((lam + mu) * gz * gz + mu * g2); } }
+    if (nb1) for (let i = 0; i < tm.nv * 3; i++) D[i] += nb1[i];
+  }
+  /* restriction (Pᵀ) : un nœud milieu renvoie la moitié de sa valeur à chacun des deux sommets de son arête */
+  function p2to1(tm, r, r1) { const nv = tm.nv, { ma, mb } = p1Data(tm); r1.set(r.subarray(0, nv * 3)); for (let m = 0, M = tm.nn - nv; m < M; m++) { const i = (nv + m) * 3, a = ma[m] * 3, b = mb[m] * 3; for (let c = 0; c < 3; c++) { r1[a + c] += 0.5 * r[i + c]; r1[b + c] += 0.5 * r[i + c]; } } }
+  /* prolongement (P) : sommets copiés, nœud milieu = moyenne des deux sommets */
+  function p1to2add(tm, z1, z, fixed) { const nv = tm.nv, { ma, mb } = p1Data(tm); for (let i = 0; i < nv * 3; i++) if (!fixed[i]) z[i] += z1[i]; for (let m = 0, M = tm.nn - nv; m < M; m++) { const i = (nv + m) * 3, a = ma[m] * 3, b = mb[m] * 3; for (let c = 0; c < 3; c++) if (!fixed[i + c]) z[i + c] += 0.5 * (z1[a + c] + z1[b + c]); } }
+
   /* ---------- Gradient conjugué ; préconditionneur : lissage de Tchebychev sur les tétraèdres
      + correction calculée sur la grille de cellules coupées (un cycle de multigrille) ---------- */
   async function tetPcg(o) {
-    const { tm, hex, lam, mu, fixed, x, f, nb } = o, tol = o.tol || 1e-6, maxIter = o.maxIter || 5000, n = tm.nn * 3;
+    const { tm, hex, lam, mu, fixed, x, f, nb } = o, esc = o.esc || null, tol = o.tol || 1e-6, maxIter = o.maxIter || 5000, n = tm.nn * 3;
     const r = new Float64Array(n), z = new Float64Array(n), p = new Float64Array(n), q = new Float64Array(n), iD = new Float64Array(n), d = new Float64Array(n), rr_ = new Float64Array(n);
-    tetDiag(tm, lam, mu, iD, nb); for (let i = 0; i < n; i++) iD[i] = fixed[i] || !(iD[i] > 0) ? 0 : 1 / iD[i];
+    tetDiag(tm, lam, mu, iD, nb, esc); for (let i = 0; i < n; i++) iD[i] = fixed[i] || !(iD[i] > 0) ? 0 : 1 / iD[i];
     /* plus grande valeur propre de D⁻¹K (itération de puissance) */
-    let lmax = 1; { for (let i = 0; i < n; i++) p[i] = fixed[i] ? 0 : Math.sin(i * 0.731 + 1) + 0.3; for (let it = 0; it < 14; it++) { tetMatvec(tm, lam, mu, p, q, nb); let a = 0, b = 0; for (let i = 0; i < n; i++) { q[i] *= iD[i]; a += q[i] * q[i]; b += p[i] * p[i]; } lmax = Math.sqrt(a / b); const s = 1 / Math.sqrt(a); for (let i = 0; i < n; i++) p[i] = q[i] * s; } lmax *= 1.12; }
-    const mg = I.mgSetup(hex, o.Ke, o.hexScale, o.hexFixed, o.hexNb || null), nh = hex.nn * 3, cb = new Float64Array(nh), cx = new Float64Array(nh), pc = tm.pc, pw = tm.pw, hf = o.hexFixed;
-    const DEG = 2, AL = 6, lmin = lmax / AL, th = (lmax + lmin) / 2, de = (lmax - lmin) / 2, sg = th / de;
+    let lmax = 1; { for (let i = 0; i < n; i++) p[i] = fixed[i] ? 0 : Math.sin(i * 0.731 + 1) + 0.3; for (let it = 0; it < 14; it++) { tetMatvec(tm, lam, mu, p, q, nb, esc); let a = 0, b = 0; for (let i = 0; i < n; i++) { q[i] *= iD[i]; a += q[i] * q[i]; b += p[i] * p[i]; } lmax = Math.sqrt(a / b); const s = 1 / Math.sqrt(a); for (let i = 0; i < n; i++) p[i] = q[i] * s; } lmax *= 1.12; }
+    const mg = I.mgSetup(hex, o.Ke, o.hexScale || (esc ? hexScaleFrom(tm, hex, esc, o.E || 1) : new Float64Array(hex.ne).fill(hex.h)), o.hexFixed, o.hexNb || null), nh = hex.nn * 3, cb = new Float64Array(nh), cx = new Float64Array(nh), pc = tm.pc, pw = tm.pw, hf = o.hexFixed;
+    const tS = Date.now(); DBG.setup = (DBG.setup || 0); 
+    const DEG = PCGP.deg, AL = PCGP.al, lmin = lmax / AL, th = (lmax + lmin) / 2, de = (lmax - lmin) / 2, sg = th / de;
     const cheb = (b, xx, fromZero, needRes) => {
       let rho = 1 / sg;
-      if (fromZero) { for (let i = 0; i < n; i++) { xx[i] = 0; rr_[i] = fixed[i] ? 0 : b[i]; } } else { tetMatvec(tm, lam, mu, xx, q, nb); for (let i = 0; i < n; i++) rr_[i] = fixed[i] ? 0 : b[i] - q[i]; }
+      if (fromZero) { for (let i = 0; i < n; i++) { xx[i] = 0; rr_[i] = fixed[i] ? 0 : b[i]; } } else { tetMatvec(tm, lam, mu, xx, q, nb, esc); for (let i = 0; i < n; i++) rr_[i] = fixed[i] ? 0 : b[i] - q[i]; }
       for (let i = 0; i < n; i++) d[i] = iD[i] * rr_[i] / th;
       for (let k = 0; k < DEG; k++) {
         for (let i = 0; i < n; i++) xx[i] += d[i];
         if (k === DEG - 1 && !needRes) break;
-        tetMatvec(tm, lam, mu, d, q, nb); const rn = 1 / (2 * sg - rho), c1 = rn * rho, c2 = 2 * rn / de;
+        tetMatvec(tm, lam, mu, d, q, nb, esc); const rn = 1 / (2 * sg - rho), c1 = rn * rho, c2 = 2 * rn / de;
         for (let i = 0; i < n; i++) { if (!fixed[i]) rr_[i] -= q[i]; d[i] = c1 * d[i] + c2 * iD[i] * rr_[i]; } rho = rn;
       }
     };
+    /* niveau linéaire (sommets) : opérateur, diagonale, plus grande valeur propre, lissage */
+    const nv = tm.nv, n1 = nv * 3, fx1 = fixed.subarray(0, n1), r1 = new Float64Array(n1), z1 = new Float64Array(n1), rr1 = new Float64Array(n1), d1 = new Float64Array(n1), q1 = new Float64Array(n1), iD1 = new Float64Array(n1);
+    let nb1 = null; if (nb) { nb1 = new Float64Array(n1); const { ma, mb } = p1Data(tm); for (let i = 0; i < nv; i++) for (let c = 0; c < 3; c++) nb1[i * 3 + c] = nb[i * 6 + c]; for (let m = 0, M = tm.nn - nv; m < M; m++) for (let c = 0; c < 3; c++) { const k = nb[(nv + m) * 6 + c] * 0.5; nb1[ma[m] * 3 + c] += k; nb1[mb[m] * 3 + c] += k; } }
+    p1Diag(tm, lam, mu, iD1, nb1, esc); for (let i = 0; i < n1; i++) iD1[i] = fx1[i] || !(iD1[i] > 0) ? 0 : 1 / iD1[i];
+    let lmax1 = 1; { for (let i = 0; i < n1; i++) d1[i] = fx1[i] ? 0 : Math.sin(i * 0.613 + 2) + 0.3; for (let it = 0; it < 14; it++) { p1Matvec(tm, lam, mu, d1, q1, nb1, esc); let a = 0; for (let i = 0; i < n1; i++) { q1[i] *= iD1[i]; a += q1[i] * q1[i]; } let b = 0; for (let i = 0; i < n1; i++) b += d1[i] * d1[i]; lmax1 = Math.sqrt(a / b); const sc = 1 / Math.sqrt(a); for (let i = 0; i < n1; i++) d1[i] = q1[i] * sc; } lmax1 *= 1.12; }
+    const L1 = lmax1 / AL, th1 = (lmax1 + L1) / 2, de1 = (lmax1 - L1) / 2, sg1 = th1 / de1;
+    const cheb1 = (b, xx, fromZero, needRes) => {
+      let rho = 1 / sg1;
+      if (fromZero) { for (let i = 0; i < n1; i++) { xx[i] = 0; rr1[i] = fx1[i] ? 0 : b[i]; } } else { p1Matvec(tm, lam, mu, xx, q1, nb1, esc); for (let i = 0; i < n1; i++) rr1[i] = fx1[i] ? 0 : b[i] - q1[i]; }
+      for (let i = 0; i < n1; i++) d1[i] = iD1[i] * rr1[i] / th1;
+      for (let k = 0; k < DEG; k++) {
+        for (let i = 0; i < n1; i++) xx[i] += d1[i];
+        if (k === DEG - 1 && !needRes) break;
+        p1Matvec(tm, lam, mu, d1, q1, nb1, esc); const rn = 1 / (2 * sg1 - rho), c1 = rn * rho, c2 = 2 * rn / de1;
+        for (let i = 0; i < n1; i++) { if (!fx1[i]) rr1[i] -= q1[i]; d1[i] = c1 * d1[i] + c2 * iD1[i] * rr1[i]; } rho = rn;
+      }
+    };
+    /* cycle : lissage (10 nœuds) → niveau linéaire : lissage → grille de cubes → lissage → retour, lissage */
     const prec = () => {
-      cheb(r, z, true, true); cb.fill(0);
-      for (let v = 0, nn = tm.nn; v < nn; v++) for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; cb[c * 3] += w * rr_[v * 3]; cb[c * 3 + 1] += w * rr_[v * 3 + 1]; cb[c * 3 + 2] += w * rr_[v * 3 + 2]; }
-      for (let i = 0; i < nh; i++) if (hf[i]) cb[i] = 0;
-      I.vcycle(mg, 0, cb, cx);
-      for (let v = 0, nn = tm.nn; v < nn; v++) { let a0 = 0, a1 = 0, a2 = 0; for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; a0 += w * cx[c * 3]; a1 += w * cx[c * 3 + 1]; a2 += w * cx[c * 3 + 2]; } if (!fixed[v * 3]) z[v * 3] += a0; if (!fixed[v * 3 + 1]) z[v * 3 + 1] += a1; if (!fixed[v * 3 + 2]) z[v * 3 + 2] += a2; }
+      cheb(r, z, true, true);
+      if (PCGP.p1) {
+        p2to1(tm, rr_, r1); for (let i = 0; i < n1; i++) if (fx1[i]) r1[i] = 0;
+        cheb1(r1, z1, true, true); cb.fill(0);
+        for (let v = 0; v < nv; v++) for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; cb[c * 3] += w * rr1[v * 3]; cb[c * 3 + 1] += w * rr1[v * 3 + 1]; cb[c * 3 + 2] += w * rr1[v * 3 + 2]; }
+        for (let i = 0; i < nh; i++) if (hf[i]) cb[i] = 0;
+        I.vcycle(mg, 0, cb, cx);
+        for (let v = 0; v < nv; v++) { let a0 = 0, a1 = 0, a2 = 0; for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; a0 += w * cx[c * 3]; a1 += w * cx[c * 3 + 1]; a2 += w * cx[c * 3 + 2]; } if (!fx1[v * 3]) z1[v * 3] += a0; if (!fx1[v * 3 + 1]) z1[v * 3 + 1] += a1; if (!fx1[v * 3 + 2]) z1[v * 3 + 2] += a2; }
+        cheb1(r1, z1, false, false);
+        p1to2add(tm, z1, z, fixed);
+      } else {
+        cb.fill(0);
+        for (let v = 0, nn = tm.nn; v < nn; v++) for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; cb[c * 3] += w * rr_[v * 3]; cb[c * 3 + 1] += w * rr_[v * 3 + 1]; cb[c * 3 + 2] += w * rr_[v * 3 + 2]; }
+        for (let i = 0; i < nh; i++) if (hf[i]) cb[i] = 0;
+        I.vcycle(mg, 0, cb, cx);
+        for (let v = 0, nn = tm.nn; v < nn; v++) { let a0 = 0, a1 = 0, a2 = 0; for (let m = v * 8, e = m + 8; m < e; m++) { const c = pc[m]; if (c < 0) break; const w = pw[m]; a0 += w * cx[c * 3]; a1 += w * cx[c * 3 + 1]; a2 += w * cx[c * 3 + 2]; } if (!fixed[v * 3]) z[v * 3] += a0; if (!fixed[v * 3 + 1]) z[v * 3 + 1] += a1; if (!fixed[v * 3 + 2]) z[v * 3 + 2] += a2; }
+      }
       cheb(r, z, false, false);
     };
     for (let i = 0; i < n; i++) p[i] = fixed[i] ? x[i] : 0;
-    tetMatvec(tm, lam, mu, p, q, nb);
+    tetMatvec(tm, lam, mu, p, q, nb, esc);
     let bn = 0; for (let i = 0; i < n; i++) if (!fixed[i]) { const b = f[i] - q[i]; bn += b * b; } bn = Math.sqrt(bn);
     if (bn === 0) { for (let i = 0; i < n; i++) if (!fixed[i]) x[i] = 0; return { iter: 0, res: 0, converged: true }; }
-    tetMatvec(tm, lam, mu, x, q, nb);
+    tetMatvec(tm, lam, mu, x, q, nb, esc);
     let rz = 0, rr = 0; for (let i = 0; i < n; i++) { r[i] = fixed[i] ? 0 : f[i] - q[i]; rr += r[i] * r[i]; }
     prec(); for (let i = 0; i < n; i++) { p[i] = z[i]; rz += r[i] * z[i]; }
     let res = Math.sqrt(rr) / bn, it = 0, last = Date.now();
     while (res > tol && it < maxIter) {
-      tetMatvec(tm, lam, mu, p, q, nb);
+      tetMatvec(tm, lam, mu, p, q, nb, esc);
       let pq = 0; for (let i = 0; i < n; i++) { if (fixed[i]) q[i] = 0; pq += p[i] * q[i]; }
       if (!(pq > 0)) return { iter: it, res, converged: false };
       const al = rz / pq; rr = 0; for (let i = 0; i < n; i++) { x[i] += al * p[i]; r[i] -= al * q[i]; rr += r[i] * r[i]; }
@@ -1511,11 +1579,11 @@ if (typeof module !== 'undefined') module.exports = FEA;
     /* nœud d'axe de la grille -> nœud d'axe des tétraèdres le plus proche (pour recopier l'état du contact) */
     hpins.forEach((hb, pi) => { const tb = pins[pi], X = tm.coords, Y = hex.coords; hb.near = new Int32Array(hb.nodes.length); hb.active = new Uint8Array(hb.nodes.length).fill(1);
       for (let i = 0; i < hb.nodes.length; i++) { const a = hb.nodes[i] * 3; let best = Infinity, bi = 0; for (let j = 0; j < tb.nodes.length; j++) { const c = tb.nodes[j] * 3, dd = (X[c] - Y[a]) ** 2 + (X[c + 1] - Y[a + 1]) ** 2 + (X[c + 2] - Y[a + 2]) ** 2; if (dd < best) { best = dd; bi = j; } } hb.near[i] = bi; } });
-    let u = null, bc = null, r = null, round = 0, last = !pins.length, total = 0;
+    let u = null, bc = null, r = null, hb = null, round = 0, last = !pins.length, total = 0;
     for (; ;) {
       round++; bc = assemble(tm, bcs, kA);
       hpins.forEach((hb, pi) => { for (let i = 0; i < hb.nodes.length; i++) hb.active[i] = pins[pi].active[hb.near[i]]; });
-      const hb = I.buildBC(hex, o.hexBcs, o.kpen);
+      hb = I.buildBC(hex, o.hexBcs, o.kpen);
       if (u) for (let i = 0; i < n; i++) if (!bc.fixed[i]) bc.x[i] = u[i];
       r = await tetPcg({ tm, hex, lam, mu, Ke: o.Ke, hexScale, hexFixed: hb.fixed, hexNb: hb.nb, fixed: bc.fixed, x: bc.x, f: bc.f, nb: bc.nb, tol: last ? tol : Math.max(tol, 1e-3), tick: o.tick ? (it, res) => o.tick(it, res, round) : null });
       u = bc.x; total += r.iter; if (!r.converged || last) break;
@@ -1532,14 +1600,16 @@ if (typeof module !== 'undefined') module.exports = FEA;
       }
       if (changed <= Math.max(1, 0.01 * np) || round >= 8) last = true;
     }
-    return { u, iter: total, converged: r.converged, cancelled: r.cancelled, rounds: round };
+    return { u, iter: total, converged: r.converged, cancelled: r.cancelled, rounds: round, fixed: bc.fixed, f: bc.f, nb: bc.nb, hexFixed: hb.fixed, hexNb: hb.nb };
   }
 
   /* ---------- Contraintes aux nœuds (la déformation varie linéairement dans l'élément : on l'évalue aux 4 sommets) ---------- */
-  function tetResults(tm, E, nu, u) {
+  /* dens (facultatif) : densité par élément ; les éléments sous 0,3 sont ignorés */
+  function tetResults(tm, E, nu, u, dens) {
     const { nt, nn, tets, grads, vol } = tm, lam = E * nu / ((1 + nu) * (1 - 2 * nu)), mu = E / (2 * (1 + nu));
     const S = new Float64Array(nn * 6), W = new Float64Array(nn), vmN = new Float32Array(nn), dN = new Float32Array(nn), sc = new Float64Array(24);
     for (let e = 0; e < nt; e++) {
+      let ws = 1; if (dens) { if (dens[e] < 0.3) continue; ws = Math.sqrt(dens[e]); }
       const b = e * 10, g = e * 12, w = vol[e];
       for (let a = 0; a < 10; a++) { const n = tets[b + a] * 3; U[a * 3] = u[n]; U[a * 3 + 1] = u[n + 1]; U[a * 3 + 2] = u[n + 2]; }
       const cv = tm.cidx[e] >= 0;
@@ -1553,21 +1623,192 @@ if (typeof module !== 'undefined') module.exports = FEA;
           G00 += a0 * gx; G01 += a0 * gy; G02 += a0 * gz; G10 += a1 * gx; G11 += a1 * gy; G12 += a1 * gz; G20 += a2 * gx; G21 += a2 * gy; G22 += a2 * gz;
         }
         const tr = lam * (G00 + G11 + G22); sc[i * 6] = tr + 2 * mu * G00; sc[i * 6 + 1] = tr + 2 * mu * G11; sc[i * 6 + 2] = tr + 2 * mu * G22; sc[i * 6 + 3] = mu * (G01 + G10); sc[i * 6 + 4] = mu * (G12 + G21); sc[i * 6 + 5] = mu * (G02 + G20);
-        const n = tets[b + i]; for (let c = 0; c < 6; c++) S[n * 6 + c] += w * sc[i * 6 + c]; W[n] += w;
+        const n = tets[b + i]; for (let c = 0; c < 6; c++) S[n * 6 + c] += w * ws * sc[i * 6 + c]; W[n] += w;
       }
-      for (let q = 0; q < 6; q++) { const n = tets[b + 4 + q], i = EDG[q][0], j = EDG[q][1]; for (let c = 0; c < 6; c++) S[n * 6 + c] += w * 0.5 * (sc[i * 6 + c] + sc[j * 6 + c]); W[n] += w; }
+      for (let q = 0; q < 6; q++) { const n = tets[b + 4 + q], i = EDG[q][0], j = EDG[q][1]; for (let c = 0; c < 6; c++) S[n * 6 + c] += w * ws * 0.5 * (sc[i * 6 + c] + sc[j * 6 + c]); W[n] += w; }
     }
-    let maxD = 0, maxVm = 0;
+    let maxD = 0, maxVm = 0; const used = [];
     for (let n = 0; n < nn; n++) {
-      const c = 1 / (W[n] || 1), q = n * 6, sxx = S[q] * c, syy = S[q + 1] * c, szz = S[q + 2] * c, sxy = S[q + 3] * c, syz = S[q + 4] * c, szx = S[q + 5] * c;
-      vmN[n] = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * (sxy * sxy + syz * syz + szx * szx)); if (vmN[n] > maxVm) maxVm = vmN[n];
+      if (!(W[n] > 0)) continue;
+      const c = 1 / W[n], q = n * 6, sxx = S[q] * c, syy = S[q + 1] * c, szz = S[q + 2] * c, sxy = S[q + 3] * c, syz = S[q + 4] * c, szx = S[q + 5] * c;
+      vmN[n] = Math.sqrt(0.5 * ((sxx - syy) ** 2 + (syy - szz) ** 2 + (szz - sxx) ** 2) + 3 * (sxy * sxy + syz * syz + szx * szx)); if (vmN[n] > maxVm) maxVm = vmN[n]; used.push(vmN[n]);
       dN[n] = Math.hypot(u[n * 3], u[n * 3 + 1], u[n * 3 + 2]); if (dN[n] > maxD) maxD = dN[n];
     }
-    const s = Float32Array.from(vmN).sort(), p99 = s[Math.min(nn - 1, Math.floor(nn * 0.99))];
+    const s = Float32Array.from(used).sort(), p99 = s.length ? s[Math.min(s.length - 1, Math.floor(s.length * 0.99))] : 0;
     return { u, vmN, dN, maxD, maxVm, p99 };
   }
 
-  F.tet = { set: (a, b, frs, ps) => { USE_ONCUT = a; OFFS = b; if (frs) FRS = frs; if (ps) PRESNAP = ps; }, DBG, tetMesh, linkHex, tetMatvec, tetPcg, tetBCs, assemble, tetSolve, tetResults };
+
+  /* ---------- Optimisation topologique sur tétraèdres ---------- */
+  /* voisins par face (−1 : bord) */
+  function tetAdj(tm) {
+    if (tm.adj) return tm.adj;
+    const nt = tm.nt, T = tm.tets, FV = [[1, 2, 3], [0, 3, 2], [0, 1, 3], [0, 2, 1]], adj = new Int32Array(nt * 4).fill(-1);
+    let sz = 1; while (sz < nt * 8) sz <<= 1; const mk = sz - 1, tb = new Int32Array(sz).fill(-1), k3 = new Int32Array(nt * 12);
+    for (let f = 0; f < nt * 4; f++) {
+      const t = f >> 2, l = FV[f & 3]; let a = T[t * 10 + l[0]], b = T[t * 10 + l[1]], c = T[t * 10 + l[2]], w;
+      if (a > b) { w = a; a = b; b = w; } if (b > c) { w = b; b = c; c = w; } if (a > b) { w = a; a = b; b = w; }
+      k3[f * 3] = a; k3[f * 3 + 1] = b; k3[f * 3 + 2] = c; let p = (Math.imul(a, 73856093) ^ Math.imul(b, 19349663) ^ Math.imul(c, 83492791)) & mk;
+      for (; ;) { const q = tb[p]; if (q < 0) { tb[p] = f; break; } if (k3[q * 3] === a && k3[q * 3 + 1] === b && k3[q * 3 + 2] === c && adj[q] < 0) { adj[q] = t; adj[f] = q >> 2; break; } p = (p + 1) & mk; }
+    }
+    return (tm.adj = adj);
+  }
+  /* éléments du masque reliés par leurs faces aux éléments « graines » (retire les morceaux flottants) */
+  function tetConnected(tm, mask, seed) {
+    const adj = tetAdj(tm), out = new Uint8Array(tm.nt), st = [];
+    for (let e = 0; e < tm.nt; e++) if (mask[e] && seed[e]) { out[e] = 1; st.push(e); }
+    while (st.length) { const e = st.pop(); for (let q = 0; q < 4; q++) { const o = adj[e * 4 + q]; if (o >= 0 && mask[o] && !out[o]) { out[o] = 1; st.push(o); } } }
+    return out;
+  }
+  function centroids(tm) {
+    if (tm.cen) return tm.cen; const C = new Float64Array(tm.nt * 3), X = tm.coords, T = tm.tets;
+    for (let e = 0; e < tm.nt; e++) for (let q = 0; q < 4; q++) for (let k = 0; k < 3; k++) C[e * 3 + k] += X[T[e * 10 + q] * 3 + k] / 4;
+    return (tm.cen = C);
+  }
+  /* cellule de la grille auxiliaire qui contient chaque tétraèdre (pour le préconditionneur) */
+  function hexOf(tm, hex) {
+    if (tm.hexOf && tm.hexOfMesh === hex) return tm.hexOf;
+    const C = centroids(tm), { nx, ny, nz, h, ox, oy, oz, elemOf } = hex, out = new Int32Array(tm.nt).fill(-1);
+    for (let e = 0; e < tm.nt; e++) {
+      const i = Math.min(nx - 1, Math.max(0, Math.floor((C[e * 3] - ox) / h))), j = Math.min(ny - 1, Math.max(0, Math.floor((C[e * 3 + 1] - oy) / h))), k = Math.min(nz - 1, Math.max(0, Math.floor((C[e * 3 + 2] - oz) / h)));
+      let q = elemOf[i + nx * (j + ny * k)];
+      if (q < 0) { let best = Infinity; for (let c = Math.max(0, k - 1); c <= Math.min(nz - 1, k + 1); c++) for (let b = Math.max(0, j - 1); b <= Math.min(ny - 1, j + 1); b++) for (let a = Math.max(0, i - 1); a <= Math.min(nx - 1, i + 1); a++) {
+        const r = elemOf[a + nx * (b + ny * c)]; if (r < 0) continue; const d = (ox + (a + 0.5) * h - C[e * 3]) ** 2 + (oy + (b + 0.5) * h - C[e * 3 + 1]) ** 2 + (oz + (c + 0.5) * h - C[e * 3 + 2]) ** 2; if (d < best) { best = d; q = r; } } }
+      out[e] = q;
+    }
+    tm.hexOfMesh = hex; return (tm.hexOf = out);
+  }
+  /* rigidité de la grille auxiliaire : moyenne (pondérée par le volume) des coefficients des tétraèdres qu'elle contient */
+  function hexScaleFrom(tm, hex, esc, E) {
+    const map = hexOf(tm, hex), a = new Float64Array(hex.ne), v = new Float64Array(hex.ne), out = new Float64Array(hex.ne);
+    for (let e = 0; e < tm.nt; e++) { const q = map[e]; if (q < 0) continue; a[q] += tm.vol[e] * esc[e]; v[q] += tm.vol[e]; }
+    if (PCGP.hmean === 'geom') { a.fill(0); for (let e = 0; e < tm.nt; e++) { const q = map[e]; if (q >= 0) a[q] += tm.vol[e] * Math.log(esc[e]); } for (let q = 0; q < hex.ne; q++) out[q] = E * hex.h * (v[q] > 0 ? Math.exp(a[q] / v[q]) : 1); return out; }
+    for (let q = 0; q < hex.ne; q++) out[q] = E * hex.h * (v[q] > 0 ? a[q] / v[q] : 1);
+    return out;
+  }
+  /* énergie de déformation u_eᵀ K_e u_e de chaque élément (rigidité pleine) */
+  function tetEnergy(tm, lam, mu, u, out) {
+    const T = tm.tets;
+    for (let e = 0; e < tm.nt; e++) {
+      for (let a = 0; a < 10; a++) { const n = T[e * 10 + a] * 3; U[a * 3] = u[n]; U[a * 3 + 1] = u[n + 1]; U[a * 3 + 2] = u[n + 2]; }
+      elemKu(tm, e, lam, mu); let s = 0; for (let i = 0; i < 30; i++) s += U[i] * FE[i]; out[e] = s;
+    }
+  }
+  /* filtre : voisins à moins de rf (centres des éléments), poids rf − d */
+  function filterCSR(tm, rf) {
+    if (tm.flt && tm.flt.rf === rf) return tm.flt;
+    const C = centroids(tm), nt = tm.nt, grid = new Map(), key = (i, j, k) => i + ',' + j + ',' + k;
+    for (let e = 0; e < nt; e++) { const kk = key(Math.floor(C[e * 3] / rf), Math.floor(C[e * 3 + 1] / rf), Math.floor(C[e * 3 + 2] / rf)); let l = grid.get(kk); if (!l) grid.set(kk, l = []); l.push(e); }
+    const ptr = new Int32Array(nt + 1), idx = [], w = [];
+    for (let e = 0; e < nt; e++) {
+      const i = Math.floor(C[e * 3] / rf), j = Math.floor(C[e * 3 + 1] / rf), k = Math.floor(C[e * 3 + 2] / rf);
+      for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) { const l = grid.get(key(i + a, j + b, k + c)); if (!l) continue;
+        for (const q of l) { const d = Math.hypot(C[q * 3] - C[e * 3], C[q * 3 + 1] - C[e * 3 + 1], C[q * 3 + 2] - C[e * 3 + 2]); if (d < rf) { idx.push(q); w.push(rf - d); } } }
+      ptr[e + 1] = idx.length;
+    }
+    return (tm.flt = { rf, ptr, idx: Int32Array.from(idx), w: Float32Array.from(w) });
+  }
+  /* SIMP avec filtre de densité et projection à seuil (Heaviside, β doublé tous les 10 pas jusqu'à 16), critère d'optimalité.
+     Variables de conception x ; densités filtrées x̃ = H·x (rayon 1,5 h, pondérées par le volume) ; densités physiques
+     x̄ = projection de x̃ autour de 0,5. La rigidité suit x̄³. Le filtre empêche les damiers et les stries liés à l'orientation
+     des tétraèdres ; la projection rend la forme nette (peu d'éléments « gris »).
+     mode 'vol' : fraction de matière imposée ; mode 'fs' : la quantité de matière suit le facteur de sécurité visé.
+     Renvoie x (densités physiques, pour l'affichage et le seuil) et xd (variables de conception, pour reprendre). */
+  async function tetTopopt(o) {
+    const hex = o.mesh, tm = hex.tet, E = o.E, nu = o.nu, lam = E * nu / ((1 + nu) * (1 - 2 * nu)), mu = E / (2 * (1 + nu)), ne = tm.nt, vol = tm.vol;
+    const iters = o.iters || 60, fsMode = o.mode === 'fs', pen = 3, Emin = 1e-3, F_ = filterCSR(tm, 1.5 * hex.h), passive = o.passive, eta = 0.5, BMAX = 16;
+    const wv = new Float64Array(F_.idx.length), Ws = new Float64Array(ne);
+    for (let e = 0; e < ne; e++) for (let q = F_.ptr[e]; q < F_.ptr[e + 1]; q++) { wv[q] = F_.w[q] * vol[F_.idx[q]]; Ws[e] += wv[q]; }
+    const x = new Float64Array(ne), xt = new Float64Array(ne), xp = new Float64Array(ne), dp = new Float64Array(ne), esc = new Float64Array(ne), ce = new Float64Array(ne);
+    const dcx = new Float64Array(ne), dvx = new Float64Array(ne), xn = new Float64Array(ne), tt = new Float64Array(ne), tp = new Float64Array(ne);
+    let beta = o.beta0 || 1;
+    const filt = (src, dst) => { for (let e = 0; e < ne; e++) { let s = 0; for (let q = F_.ptr[e]; q < F_.ptr[e + 1]; q++) s += wv[q] * src[F_.idx[q]]; dst[e] = s / Ws[e]; } };
+    const proj = (src, dst, der) => { const d0 = Math.tanh(beta * eta), dn = d0 + Math.tanh(beta * (1 - eta)); for (let e = 0; e < ne; e++) { if (passive[e]) { dst[e] = 1; if (der) der[e] = 0; continue; } const t = Math.tanh(beta * (src[e] - eta)); dst[e] = (d0 + t) / dn; if (der) der[e] = beta * (1 - t * t) / dn; } };
+    const volOf = xx => { filt(xx, tt); proj(tt, tp, null); let v = 0; for (let e = 0; e < ne; e++) v += tp[e] * vol[e]; return v; };
+    let vtot = 0, np = 0; for (let e = 0; e < ne; e++) { vtot += vol[e]; if (passive[e]) np += vol[e]; }
+    const vmin = Math.max(np * 1.02, 0.05 * vtot); let target = fsMode ? vtot : Math.max(o.volfrac * vtot, np * 1.02), fs = 0;
+    if (o.xInit) x.set(o.xInit); else for (let e = 0; e < ne; e++) x[e] = passive[e] ? 1 : Math.min(1, target / vtot);
+    const u = Float64Array.from(o.x0); let sinceB = 0;
+    for (let it = 1; it <= iters; it++) {
+      filt(x, xt); proj(xt, xp, dp);
+      for (let e = 0; e < ne; e++) esc[e] = Emin + Math.pow(xp[e], pen) * (1 - Emin);
+      const r = await tetPcg({ tm, hex, lam, mu, Ke: o.Ke, hexScale: hexScaleFrom(tm, hex, esc, E), hexFixed: o.hexFixed, hexNb: o.hexNb, fixed: o.fixed, x: u, f: o.f, nb: o.nb, esc, tol: 1e-3, maxIter: 3000, tick: o.tick ? (i, res) => o.tick(it, i, res) : null });
+      if (r.cancelled) return { x: xp, xd: x, cancelled: true, iter: it, fs, beta };
+      if (fsMode) {
+        fs = o.Sy / Math.max(1e-12, tetResults(tm, E, nu, u, xp).maxVm);
+        target = Math.min(vtot, Math.max(vmin, target * Math.min(1.04, Math.max(0.95, Math.sqrt(o.fsTarget / fs)))));
+      }
+      tetEnergy(tm, lam, mu, u, ce); let comp = 0;
+      /* sensibilités par rapport à x̄, puis x̃ (projection), puis x (filtre transposé) */
+      dcx.fill(0); dvx.fill(0);
+      for (let e = 0; e < ne; e++) {
+        comp += esc[e] * ce[e];
+        const dct = -pen * xp[e] * xp[e] * (1 - Emin) * ce[e] * dp[e], dvt = vol[e] * dp[e], k = 1 / Ws[e];
+        for (let q = F_.ptr[e]; q < F_.ptr[e + 1]; q++) { const j = F_.idx[q], w = wv[q] * k; dcx[j] += w * dct; dvx[j] += w * dvt; }
+      }
+      const move = beta >= 8 ? 0.1 : 0.2;
+      let l1 = 0, l2 = 1e-30; for (let e = 0; e < ne; e++) if (dvx[e] > 0 && -dcx[e] / dvx[e] > l2) l2 = -dcx[e] / dvx[e]; l2 *= 1e4;
+      for (let b = 0; b < 60; b++) {
+        const lm = 0.5 * (l1 + l2);
+        for (let e = 0; e < ne; e++) { if (passive[e]) { xn[e] = 1; continue; } const v = dvx[e] > 0 ? x[e] * Math.sqrt(Math.max(0, -dcx[e]) / (lm * dvx[e])) : x[e]; xn[e] = Math.max(0, Math.max(x[e] - move, Math.min(1, Math.min(x[e] + move, v)))); }
+        if (volOf(xn) > target) l1 = lm; else l2 = lm;
+        if ((l2 - l1) / (l1 + l2) < 1e-4) break;
+      }
+      let ch = 0; for (let e = 0; e < ne; e++) { const d = Math.abs(xn[e] - x[e]); if (d > ch) ch = d; x[e] = xn[e]; }
+      filt(x, xt); proj(xt, xp, null);
+      if (o.onIter && (await o.onIter(it, xp, comp, ch, fs, target / vtot, beta)) === false) return { x: xp, xd: x, cancelled: true, iter: it, fs, beta };
+      sinceB++;
+      const settled = fsMode ? (ch < 0.03 && Math.abs(fs / o.fsTarget - 1) < 0.03) : ch < 0.01;
+      if (beta < BMAX && (sinceB >= 10 || settled)) { beta *= 2; sinceB = 0; }
+      else if (beta >= BMAX && settled && it > 10) return { x: xp, xd: x, iter: it, fs, beta };
+    }
+    return { x: xp, xd: x, iter: iters, fs, beta };
+  }
+  /* analyse de contrôle : seuls les éléments du masque portent (les autres gardent 10⁻⁶ de rigidité) */
+  async function tetVerify(o) {
+    const hex = o.mesh, tm = hex.tet, E = o.E, nu = o.nu, lam = E * nu / ((1 + nu) * (1 - 2 * nu)), mu = E / (2 * (1 + nu)), esc = new Float64Array(tm.nt);
+    for (let e = 0; e < tm.nt; e++) esc[e] = o.mask[e] ? 1 : 1e-4;
+    const x = Float64Array.from(o.x0), r = await tetPcg({ tm, hex, lam, mu, Ke: o.Ke, hexScale: hexScaleFrom(tm, hex, esc, E), hexFixed: o.hexFixed, hexNb: o.hexNb, fixed: o.fixed, x, f: o.f, nb: o.nb, esc, tol: 1e-5, maxIter: 3000, tick: o.tick });
+    return { u: x, converged: r.converged, cancelled: r.cancelled, iter: r.iter };
+  }
+  /* Surface lisse de la forme optimisée : densité moyennée aux sommets, surface tracée là où elle vaut le seuil
+     (tétraèdres « marchants »), fermée par les faces de bord de la pièce découpées au même seuil.
+     val (facultatif) : valeur aux nœuds à interpoler (contrainte) ; renvoie positions, normales, valeurs par sommet. */
+  function tetIso(tm, xe, keep, thr, val) {
+    const nv = tm.nv, T = tm.tets, X = tm.coords, dn = new Float64Array(nv), wv = new Float64Array(nv);
+    for (let e = 0; e < tm.nt; e++) { const d = keep[e] ? xe[e] : 0, w = tm.vol[e]; for (let q = 0; q < 4; q++) { const n = T[e * 10 + q]; dn[n] += w * d; wv[n] += w; } }
+    for (let n = 0; n < nv; n++) dn[n] = (wv[n] > 0 ? dn[n] / wv[n] : 0) - thr;
+    const P = [], V = [], pt = (a, b) => { const sa = dn[a], sb = dn[b], t = sa / (sa - sb); P.push(X[a * 3] + t * (X[b * 3] - X[a * 3]), X[a * 3 + 1] + t * (X[b * 3 + 1] - X[a * 3 + 1]), X[a * 3 + 2] + t * (X[b * 3 + 2] - X[a * 3 + 2])); V.push(val ? val[a] + t * (val[b] - val[a]) : 0); };
+    const vx = a => { P.push(X[a * 3], X[a * 3 + 1], X[a * 3 + 2]); V.push(val ? val[a] : 0); };
+    /* triangle orienté pour que sa normale pointe vers dir */
+    const tri = (n0, dir) => { const o = P.length - 9, ux = P[o + 3] - P[o], uy = P[o + 4] - P[o + 1], uz = P[o + 5] - P[o + 2], wx = P[o + 6] - P[o], wy = P[o + 7] - P[o + 1], wz = P[o + 8] - P[o + 2];
+      if ((uy * wz - uz * wy) * dir[0] + (uz * wx - ux * wz) * dir[1] + (ux * wy - uy * wx) * dir[2] < 0) { for (let k = 0; k < 3; k++) { const t = P[o + 3 + k]; P[o + 3 + k] = P[o + 6 + k]; P[o + 6 + k] = t; } const t = V[V.length - 2]; V[V.length - 2] = V[V.length - 1]; V[V.length - 1] = t; } };
+    const ins = [0, 0, 0, 0], out = [0, 0, 0, 0], dir = [0, 0, 0];
+    for (let e = 0; e < tm.nt; e++) {
+      let ni = 0, no = 0; for (let q = 0; q < 4; q++) { const n = T[e * 10 + q]; if (dn[n] > 0) ins[ni++] = n; else out[no++] = n; }
+      if (!ni || !no) continue;
+      for (let k = 0; k < 3; k++) { let ci = 0, co = 0; for (let q = 0; q < ni; q++) ci += X[ins[q] * 3 + k] / ni; for (let q = 0; q < no; q++) co += X[out[q] * 3 + k] / no; dir[k] = co - ci; }
+      if (ni === 1) { pt(ins[0], out[0]); pt(ins[0], out[1]); pt(ins[0], out[2]); tri(0, dir); }
+      else if (no === 1) { pt(out[0], ins[0]); pt(out[0], ins[1]); pt(out[0], ins[2]); tri(0, dir); }
+      else { pt(ins[0], out[0]); pt(ins[0], out[1]); pt(ins[1], out[1]); tri(0, dir); pt(ins[0], out[0]); pt(ins[1], out[1]); pt(ins[1], out[0]); tri(0, dir); }
+    }
+    /* faces de bord de la pièce, découpées à la partie où la densité dépasse le seuil (orientation de la face conservée) */
+    const bf = tm.bfaces, poly = [];
+    for (let f = 0; f < tm.nbf; f++) {
+      const c = [bf[f * 6], bf[f * 6 + 1], bf[f * 6 + 2]]; if (dn[c[0]] <= 0 && dn[c[1]] <= 0 && dn[c[2]] <= 0) continue;
+      const ux = X[c[1] * 3] - X[c[0] * 3], uy = X[c[1] * 3 + 1] - X[c[0] * 3 + 1], uz = X[c[1] * 3 + 2] - X[c[0] * 3 + 2], wx = X[c[2] * 3] - X[c[0] * 3], wy = X[c[2] * 3 + 1] - X[c[0] * 3 + 1], wz = X[c[2] * 3 + 2] - X[c[0] * 3 + 2];
+      dir[0] = uy * wz - uz * wy; dir[1] = uz * wx - ux * wz; dir[2] = ux * wy - uy * wx;
+      poly.length = 0;
+      for (let q = 0; q < 3; q++) { const a = c[q], b = c[(q + 1) % 3]; if (dn[a] > 0) poly.push([a, -1]); if ((dn[a] > 0) !== (dn[b] > 0)) poly.push(dn[a] > 0 ? [a, b] : [b, a]); }
+      const put = p => p[1] < 0 ? vx(p[0]) : pt(p[0], p[1]);
+      for (let q = 1; q + 1 < poly.length; q++) { put(poly[0]); put(poly[q]); put(poly[q + 1]); tri(0, dir); }
+    }
+    const pos = Float32Array.from(P), nrm = new Float32Array(pos.length);
+    for (let t = 0; t < pos.length; t += 9) { const ux = pos[t + 3] - pos[t], uy = pos[t + 4] - pos[t + 1], uz = pos[t + 5] - pos[t + 2], wx = pos[t + 6] - pos[t], wy = pos[t + 7] - pos[t + 1], wz = pos[t + 8] - pos[t + 2]; let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx; const l = Math.hypot(nx, ny, nz) || 1; for (let q = 0; q < 3; q++) { nrm[t + q * 3] = nx / l; nrm[t + q * 3 + 1] = ny / l; nrm[t + q * 3 + 2] = nz / l; } }
+    return { pos, nrm, val: Float32Array.from(V) };
+  }
+
+  F.tet = { PCGP, set: (a, b, frs, ps) => { USE_ONCUT = a; OFFS = b; if (frs) FRS = frs; if (ps) PRESNAP = ps; }, DBG, tetMesh, linkHex, tetMatvec, tetPcg, tetBCs, assemble, tetSolve, tetResults, tetTopopt, tetVerify, tetConnected, tetIso, tetAdj };
 })(typeof FEA !== 'undefined' ? FEA : require('./engine.js'));
 </script>
 <script>
@@ -1881,16 +2122,28 @@ if (typeof module !== 'undefined') module.exports = FEA;
     setBuf('res', { pos, nrm: S.dsp.N, col });
     R.picks.res = { pos, vals, unit: g.unit };
   }
+  const optTet = () => { const c = S.opt.ctx; return !!(c && c.tet && c.mesh === S.mesh && S.mesh.tet); };
   function optMask() {
-    const x = S.opt.x, m = S.mesh; let mask = new Uint8Array(m.ne); for (let e = 0; e < m.ne; e++) if (x[e] > S.opt.thr) mask[e] = 1;
-    const c = S.opt.ctx; if (c && c.mesh === m) mask = FEA.keepConnected(m, mask, c.passive); return mask;
+    const x = S.opt.x, m = S.mesh, c = S.opt.ctx, tet = optTet(), n = tet ? m.tet.nt : m.ne; let mask = new Uint8Array(n); for (let e = 0; e < n; e++) if (x[e] > S.opt.thr) mask[e] = 1;
+    if (tet) return FEA.tet.tetConnected(m.tet, mask, c.passive);
+    if (c && c.mesh === m) mask = FEA.keepConnected(m, mask, c.passive); return mask;
   }
   const verOk = () => { const v = S.opt.ver; return v && !v.fail && v.thr === S.opt.thr && v.mesh === S.mesh ? v : null; };
   function optBuffers() {
     const x = S.opt.x; if (!x || !S.mesh) { setBuf('opt', null); setBuf('optL', null); return; }
+    if (optTet()) {
+      /* tétraèdres : surface lisse tracée au seuil de densité, colorée selon la contrainte de l'analyse de contrôle */
+      const tm = S.mesh.tet, mask = optMask(), v = S.opt.colorVm && !S.busy ? verOk() : null; let kv = 0; for (let e = 0; e < tm.nt; e++) if (mask[e]) kv += tm.vol[e];
+      const iso = FEA.tet.tetIso(tm, x, mask, S.opt.thr, v ? v.vmN : null), np = iso.pos.length / 3, col = new Float32Array(iso.pos.length);
+      for (let p = 0; p < np; p++) { if (v) cmap(iso.val[p] / (v.maxVm || 1), col, p * 3); else { col[p * 3] = 0.91; col[p * 3 + 1] = 0.52; col[p * 3 + 2] = 0.36; } }
+      setBuf('opt', { pos: iso.pos, nrm: iso.nrm, col }); setBuf('optL', null);
+      S.opt.iso = iso; S.opt.faces = null; S.opt.keptVol = kv; S.opt.totVol = tm.vtot;
+      R.picks.opt = v ? { pos: iso.pos, vals: iso.val, unit: 'MPa' } : null; return;
+    }
+    S.opt.iso = null;
     const mask = optMask(); let n = 0; for (let e = 0; e < mask.length; e++) if (mask[e]) n += S.mesh.fill[e];
     const shown = Uint8Array.from(mask, (v, e) => v && S.mesh.fill[e] >= 0.5 ? 1 : 0);
-    S.opt.faces = FEA.extractFaces(S.mesh, shown); S.opt.kept = n;
+    S.opt.faces = FEA.extractFaces(S.mesh, shown); S.opt.kept = n; S.opt.keptVol = n * S.mesh.h ** 3; S.opt.totVol = S.mesh.vol;
     const v = S.opt.colorVm && !S.busy ? verOk() : null;
     const pos = faceBuffers('opt', S.opt.faces, v ? nd => v.vmN[nd] / (v.maxVm || 1) : null, null, 0, [0.91, 0.52, 0.36]);
     R.picks.opt = v ? { pos, quads: S.opt.faces.quads, val: nd => v.vmN[nd], unit: 'MPa' } : null;
@@ -1979,9 +2232,10 @@ onmessage = async e => {
   try {
     a.tick = (...v) => { postMessage({ t: 'p', id: m.id, a: v }); };
     if (m.fn === 'solveContact') { const r = await FEA.solveContact(a); out = { u: r.u, fixed: r.fixed, f: r.f, nb: r.nb, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
-    else if (m.fn === 'tetSolve') { const r = await FEA.tet.tetSolve(a); out = { u: r.u, iter: r.iter, converged: r.converged, rounds: r.rounds }; }
+    else if (m.fn === 'tetSolve') { const r = await FEA.tet.tetSolve(a); out = { u: r.u, iter: r.iter, converged: r.converged, rounds: r.rounds, fixed: r.fixed, f: r.f, nb: r.nb, hexFixed: r.hexFixed, hexNb: r.hexNb }; }
+    else if (m.fn === 'tetVerify') { const r = await FEA.tet.tetVerify(a); out = { x: r.u, iter: r.iter, converged: r.converged }; }
     else if (m.fn === 'pcg') { const r = await FEA.pcg(a); out = { x: a.x, iter: r.iter, converged: r.converged }; }
-    else { a.onIter = (it, x, comp, ch, fs, vf) => { postMessage({ t: 'i', id: m.id, a: [it, Float64Array.from(x), comp, ch, fs, vf] }); }; const r = await FEA.topopt(a); out = { x: r.x, iter: r.iter, fs: r.fs }; }
+    else { a.onIter = (it, x, comp, ch, fs, vf, beta) => { postMessage({ t: 'i', id: m.id, a: [it, Float64Array.from(x), comp, ch, fs, vf, beta] }); }; const r = await (m.fn === 'tetTopopt' ? FEA.tet.tetTopopt(a) : FEA.topopt(a)); out = { x: r.x, xd: r.xd, iter: r.iter, fs: r.fs }; }
     postMessage({ t: 'r', id: m.id, out });
   } catch (err) { postMessage({ t: 'e', id: m.id, msg: String(err && err.message || err) }); }
 };`;
@@ -1990,8 +2244,8 @@ onmessage = async e => {
   async function runMain(fn, args, hooks) {
     const a = Object.assign({}, args, { mesh: S.mesh, Ke: FEA.hexKe(args.nu) });
     a.tick = async (...v) => { if (hooks.tick) hooks.tick(...v); await frame(); return !S.cancel; };
-    if (fn === 'topopt') a.onIter = async (...v) => { if (hooks.iter) hooks.iter(...v); await frame(); return !S.cancel; };
-    const r = await (fn === 'tetSolve' ? FEA.tet.tetSolve(a) : FEA[fn](a)); if (fn === 'pcg') r.x = a.x; return r;
+    if (fn === 'topopt' || fn === 'tetTopopt') a.onIter = async (...v) => { if (hooks.iter) hooks.iter(...v); await frame(); return !S.cancel; };
+    const r = await (FEA.tet[fn] ? FEA.tet[fn](a) : FEA[fn](a)); if (fn === 'pcg') r.x = a.x; if (fn === 'tetVerify') r.x = r.u; return r;
   }
   function getWorker() {
     if (WK.w === null) {
@@ -2044,6 +2298,13 @@ onmessage = async e => {
   /* analyse de contrôle de la forme optimisée (éléments conservés seulement) */
   async function verifyOpt(lab) {
     const c = S.opt.ctx, m = S.mesh; if (!c || c.mesh !== m || !S.opt.x) return null;
+    if (c.tet) {
+      const mask = optMask(), r = await run('tetVerify', { nu: S.mat.nu, E: S.mat.E, mask, fixed: c.fixed, f: c.f, nb: c.nb, hexFixed: c.hexFixed, hexNb: c.hexNb, x0: c.u0 }, { tick: (it, res) => setProg(true, (lab || 'Vérification de la forme') + ' — itération ' + it, Math.min(1, Math.log10(1 / res) / 5)) });
+      if (r.cancelled) return null;
+      if (!r.converged) { S.opt.ver = { fail: true, thr: S.opt.thr, mesh: m }; return null; }
+      const res = FEA.tet.tetResults(m.tet, S.mat.E, S.mat.nu, r.x, mask);
+      return S.opt.ver = { vmN: res.vmN, maxVm: res.maxVm, p99: res.p99, maxD: res.maxD, fs: S.mat.Sy / res.maxVm, thr: S.opt.thr, mesh: m };
+    }
     const mask = optMask(), scale = new Float64Array(m.ne); let kept = 0;
     for (let e = 0; e < m.ne; e++) if (mask[e]) { scale[e] = S.mat.E * m.h; kept += m.fill[e]; }
     const r = await run('pcg', { nu: S.mat.nu, scale, fixed: c.fixed, nb: c.nb, x: Float64Array.from(c.u0), f: c.f, tol: 1e-5, maxIter: 3000, mg: true }, { tick: (it, res) => setProg(true, (lab || 'Vérification de la forme') + ' — itération ' + it, Math.min(1, Math.log10(1 / res) / 5)) });
@@ -2060,37 +2321,40 @@ onmessage = async e => {
   }
   async function runOpt() {
     if (S.busy) return; const p = prepare(); if (!p) return;
-    const m = S.mesh, passive = new Uint8Array(m.ne), mk = new Uint8Array(m.nn), o = S.opt, fsMode = o.mode === 'fs';
+    const m = S.mesh, tet = S.elType === 'tet' && !!m.tet, o = S.opt, fsMode = o.mode === 'fs';
     if (fsMode && !(o.fs > 0)) { toast('Facteur de sécurité visé invalide.'); return; }
-    for (const b of p.list) for (const n of b.nodes) mk[n] = 1;
-    for (let e = 0; e < m.ne; e++) for (let a = 0; a < 8; a++) if (mk[m.conn[e * 8 + a]]) { passive[e] = 1; break; }
+    /* éléments touchant un appui ou une charge : toujours pleins */
+    let passive;
+    if (tet) { const tm = m.tet, mk = new Uint8Array(tm.nn); passive = new Uint8Array(tm.nt); for (const b of p.tet) for (const n of b.nodes) mk[n] = 1; for (let e = 0; e < tm.nt; e++) for (let a = 0; a < 10; a++) if (mk[tm.tets[e * 10 + a]]) { passive[e] = 1; break; } }
+    else { const mk = new Uint8Array(m.nn); passive = new Uint8Array(m.ne); for (const b of p.list) for (const n of b.nodes) mk[n] = 1; for (let e = 0; e < m.ne; e++) for (let a = 0; a < 8; a++) if (mk[m.conn[e * 8 + a]]) { passive[e] = 1; break; } }
     S.busy = true; S.cancel = false; S.tab = 'opt'; o.x = null; o.ver = null; o.info = ''; optBuffers(); ui(); setProg(true, 'Analyse de la pièce pleine…', 0); await frame();
     const done = msg => { setProg(false); S.busy = false; if (msg) toast(msg); optBuffers(); ui(); };
     try {
       /* 1. pièce pleine : zones de contact des axes et facteur de sécurité de départ */
-      const r0 = await run('solveContact', { nu: p.nu, kpen: p.kpen, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-5, mg: true }, { tick: solveTick('Analyse de la pièce pleine') });
+      const r0 = tet ? await run('tetSolve', { nu: p.nu, E: S.mat.E, kpen: p.kpen, bcs: p.tet, hexBcs: p.list.filter(b => b.type !== 'force'), tol: 1e-5 }, { tick: solveTick('Analyse de la pièce pleine') })
+        : await run('solveContact', { nu: p.nu, kpen: p.kpen, scale: new Float64Array(m.ne).fill(S.mat.E * m.h), bcs: p.list, tol: 1e-5, mg: true }, { tick: solveTick('Analyse de la pièce pleine') });
       if (r0.cancelled) return done();
       if (!r0.converged) return done('Le calcul n\'a pas convergé. Vérifiez que les appuis bloquent bien la pièce dans toutes les directions.');
-      const fs0 = S.mat.Sy / FEA.computeResults(m, S.mat.E, S.mat.nu, r0.u).maxVm;
-      o.ctx = { mesh: m, fixed: r0.fixed, f: r0.f, nb: r0.nb, passive, u0: r0.u, fs0 };
+      const fs0 = S.mat.Sy / (tet ? FEA.tet.tetResults(m.tet, S.mat.E, S.mat.nu, r0.u) : FEA.computeResults(m, S.mat.E, S.mat.nu, r0.u)).maxVm;
+      o.ctx = { mesh: m, tet, fixed: r0.fixed, f: r0.f, nb: r0.nb, hexFixed: r0.hexFixed, hexNb: r0.hexNb, passive, u0: r0.u, fs0 }; o.xd = null;
       if (fsMode && fs0 < o.fs * 1.03) return done('La pièce pleine a déjà un facteur de sécurité de ' + fmt(fs0, 3) + ' : on ne peut pas atteindre ' + fmt(o.fs, 3) + ' en enlevant de la matière. Visez une valeur plus basse, ou renforcez la pièce.');
       /* 2. optimisation */
       const iters = Math.max(5, Math.min(300, o.iters | 0)); let total = 0, note = '', stopped = false;
       const pass = async (extra, n, lab) => {
         let last = 0;
-        const r = await run('topopt', Object.assign({ E: S.mat.E, nu: S.mat.nu, Sy: S.mat.Sy, fixed: r0.fixed, nb: r0.nb, x0: r0.u, f: r0.f, passive, iters: n, mg: true }, extra), {
+        const r = await run(tet ? 'tetTopopt' : 'topopt', Object.assign({ E: S.mat.E, nu: S.mat.nu, Sy: S.mat.Sy, fixed: r0.fixed, nb: r0.nb, hexFixed: r0.hexFixed, hexNb: r0.hexNb, x0: r0.u, f: r0.f, passive, iters: n, mg: true }, extra), {
           tick: (it, i) => setProg(true, lab + ' — itération ' + it + ' / ' + n + ' · solveur ' + i, (it - 1) / n),
-          iter: (it, x, comp, ch, fs, vf) => { last = it; o.x = x; optBuffers(); setProg(true, lab + ' — itération ' + it + ' / ' + n + (fs ? ' · FS estimé ' + fmt(fs, 3) + ' · matière ' + fmt(vf * 100, 3) + ' %' : ''), it / n); }
+          iter: (it, x, comp, ch, fs, vf) => { last = it; o.x = x; if (it % (tet ? 2 : 1) === 0) optBuffers(); setProg(true, lab + ' — itération ' + it + ' / ' + n + (fs ? ' · FS estimé ' + fmt(fs, 3) + ' · matière ' + fmt(vf * 100, 3) + ' %' : ''), it / n); }
         });
-        if (r.cancelled) { stopped = true; total += last; } else { o.x = r.x; total += r.iter; }
+        if (r.cancelled) { stopped = true; total += last; } else { o.x = r.x; o.xd = r.xd || null; total += r.iter; }
       };
       await pass(fsMode ? { mode: 'fs', fsTarget: o.fs } : { mode: 'vol', volfrac: Math.max(0.05, Math.min(0.95, o.vf / 100)) }, iters, 'Optimisation');
       /* 3. contrôle sur la forme seuillée ; en mode FS, on rajoute de la matière tant que la cible n'est pas tenue */
       if (!stopped && o.x) {
         let v = await verifyOpt('Vérification de la forme');
         for (let k = 0; fsMode && k < 5 && !S.cancel && !stopped && (!v || v.fs < 0.97 * o.fs); k++) {
-          let sum = 0, tot = 0; for (let e = 0; e < m.ne; e++) { sum += o.x[e] * m.fill[e]; tot += m.fill[e]; }
-          await pass({ mode: 'vol', xInit: o.x, volfrac: Math.min(1, sum / tot * 1.07) }, 6, 'Ajustement ' + (k + 1));
+          const wv = tet ? m.tet.vol : m.fill; let sum = 0, tot = 0; for (let e = 0; e < wv.length; e++) { sum += o.x[e] * wv[e]; tot += wv[e]; }
+          await pass({ mode: 'vol', xInit: tet ? o.xd : o.x, beta0: 16, volfrac: Math.min(1, sum / tot * 1.07) }, tet ? 8 : 6, 'Ajustement ' + (k + 1));
           if (!stopped) v = await verifyOpt('Vérification de la forme');
         }
         if (fsMode && !S.cancel && v && v.fs < 0.97 * o.fs) note = ' · cible non atteinte';
@@ -2184,6 +2448,12 @@ onmessage = async e => {
   window.addEventListener('beforeunload', e => { if (PROJ.some(P => P.dirty)) { e.preventDefault(); e.returnValue = ''; } });
 
   function exportOptSTL() {
+    const iso = S.opt.iso;
+    if (iso) {
+      const nt = iso.pos.length / 9, buf = new ArrayBuffer(84 + nt * 50), dv = new DataView(buf); dv.setUint32(80, nt, true); let o = 84;
+      for (let t = 0; t < nt; t++) { for (let k = 0; k < 3; k++) dv.setFloat32(o + k * 4, iso.nrm[t * 9 + k], true); o += 12; for (let q = 0; q < 9; q++) { dv.setFloat32(o, iso.pos[t * 9 + q], true); o += 4; } o += 2; }
+      download(baseName(S.name) + '_optimise.stl', buf, 'model/stl'); return;
+    }
     const f = S.opt.faces; if (!f || !f.n) return; const X = S.mesh.coords, buf = new ArrayBuffer(84 + f.n * 100), dv = new DataView(buf); dv.setUint32(80, f.n * 2, true); let o = 84;
     for (let i = 0; i < f.n; i++) for (const tri of [[0, 1, 2], [0, 2, 3]]) {
       const N = FEA.FACE_N[f.dir[i]]; for (let k = 0; k < 3; k++) dv.setFloat32(o + k * 4, N[k], true); o += 12;
@@ -2292,18 +2562,18 @@ onmessage = async e => {
     <div class="row"><span>Itérations maximales</span>${num('opt.iters', o.iters, 10, 'min="5" max="300"')}</div>${c ? `<div class="row"><span>FS de la pièce pleine</span><span class="val">${fmt(c.fs0, 3)}</span></div>` : ''}</div>
     <div class="mut small" style="margin-bottom:10px">${fsM ? 'La matière est retirée peu à peu tant que le facteur de sécurité (limite élastique ÷ von Mises maximale) reste au-dessus de la cible. La forme finale est ensuite recalculée pour contrôle. La cible doit être inférieure au facteur de sécurité de la pièce pleine.' : 'La pièce est allégée jusqu\'au pourcentage demandé, puis recalculée pour afficher son facteur de sécurité.'}</div>
     <button class="btn primary wide" data-act="opt" ${S.busy ? 'disabled' : ''}>Lancer l'optimisation</button>
-    <div class="mut small" style="margin-top:10px">Chaque itération refait un calcul complet : commencez avec un maillage modéré (20 000 à 60 000 éléments).${S.elType === 'tet' ? ' L\'optimisation se fait toujours sur les cubes coupés, à la même taille d\'élément.' : ''}</div>`;
+    <div class="mut small" style="margin-top:10px">${S.elType === 'tet' ? 'Sur tétraèdres : chaque itération refait un calcul complet, comptez 1 à 3 s par itération pour 5 000 à 15 000 tétraèdres. Le seuil de netteté se durcit par paliers pendant les 50 premières itérations : gardez au moins 60 itérations. La forme obtenue est une surface lisse.' : 'Chaque itération refait un calcul complet : commencez avec un maillage modéré (20 000 à 60 000 éléments).'}</div>`;
     if (o.x) {
-      const kept = o.kept || 0, v = verOk(), fail = o.ver && o.ver.fail && o.ver.thr === o.thr;
+      const v = verOk(), fail = o.ver && o.ver.fail && o.ver.thr === o.thr;
       const cls = v ? (v.fs >= (fsM ? 0.97 * o.fs : S.fsTarget) ? 'ok' : v.fs >= 1 ? 'wn' : 'no') : '';
       h += `<div class="sec">RÉSULTAT</div>${v ? `<div class="verdict ${cls}">FS vérifié = ${fmt(v.fs, 3)}<small>${fsM ? 'Cible : ' + fmt(o.fs, 3) : 'Facteur visé dans Résultats : ' + fmt(S.fsTarget, 3)} · pièce pleine : ${c ? fmt(c.fs0, 3) : '—'}</small></div>` : ''}
       <div class="card"><div class="row"><span>État</span><span class="val">${esc(o.info || 'En cours…')}</span></div>
-      <div class="row"><span>Matière conservée</span><span class="val">${fmt(kept * S.mesh.h ** 3 / S.mesh.vol * 100, 3)} %</span></div><div class="row"><span>Masse</span><span class="val">${fmt(kept * S.mesh.h ** 3 * S.mat.rho * 1e-9, 3)} kg</span></div>
+      <div class="row"><span>Matière conservée</span><span class="val">${fmt((o.keptVol || 0) / (o.totVol || 1) * 100, 3)} %</span></div><div class="row"><span>Masse</span><span class="val">${fmt((o.keptVol || 0) * S.mat.rho * 1e-9, 3)} kg</span></div>
       ${v ? `<div class="row"><span>von Mises maximale</span><span class="val">${fmt(v.maxVm, 4)} MPa</span></div><div class="row"><span>von Mises, 99ᵉ centile</span><span class="val">${fmt(v.p99, 4)} MPa</span></div><div class="row"><span>Déplacement maximal</span><span class="val">${fmt(v.maxD, 4)} mm</span></div>
       <div class="row"><span><input type="checkbox" data-set="opt.colorVm" ${o.colorVm ? 'checked' : ''}> Colorer selon la contrainte</span></div>` : ''}
-      <label class="f">Seuil de densité affiché : ${fmt(o.thr, 2)}</label><input type="range" min="0.05" max="0.95" step="0.05" value="${o.thr}" data-set="opt.thr"></div>
+      <label class="f">Seuil de densité ${optTet() ? '(surface tracée à ce niveau)' : 'affiché'} : ${fmt(o.thr, 2)}</label><input type="range" min="0.05" max="0.95" step="0.05" value="${o.thr}" data-set="opt.thr"></div>
       ${!v && !S.busy ? `<div class="chk"><i class="wn"></i><span>${fail ? 'La vérification n\'a pas convergé à ce seuil.' : 'Le seuil a changé : la forme affichée n\'a pas été vérifiée.'}</span></div><button class="btn wide" data-act="verify" style="margin-bottom:8px">Vérifier cette forme</button>` : ''}
-      <button class="btn wide" data-act="optstl">Exporter la forme en STL</button><div class="mut small" style="margin-top:10px">La forme obtenue est un guide : redessinez la pièce dans SolidWorks en vous en inspirant, puis revérifiez-la avec une analyse sur maillage fin.</div>`;
+      <button class="btn wide" data-act="optstl">Exporter la forme en STL</button><div class="mut small" style="margin-top:10px">La forme obtenue est un guide : redessinez la pièce dans SolidWorks en vous en inspirant, puis revérifiez-la avec une analyse sur maillage fin.${optTet() ? ' Le STL exporté est la surface lisse, fermée : SolidWorks peut l\'importer comme corps graphique ou maillé pour servir de gabarit.' : ''}</div>`;
     }
     return h;
   }
