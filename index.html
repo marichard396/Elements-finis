@@ -10,7 +10,24 @@ button,input,select{font:inherit;color:inherit}
 #app{display:grid;grid-template-columns:330px 1fr 290px;grid-template-rows:52px 1fr 26px;height:100%}
 #top{grid-column:1/4;display:flex;align-items:center;gap:8px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--bg)}
 .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:16px;white-space:nowrap}
-.filetab{margin-left:8px;padding:6px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.filetab{display:none}
+#ptabs{display:flex;align-items:center;gap:6px;margin-left:10px;min-width:0;flex:0 1 auto;overflow-x:auto;scrollbar-width:none;padding:2px 0}
+#ptabs::-webkit-scrollbar{display:none}
+.ptab{display:flex;align-items:center;gap:6px;padding:5px 6px 5px 12px;border:1px solid var(--line);border-radius:6px;background:var(--card);cursor:pointer;max-width:230px;min-width:84px;white-space:nowrap;flex:0 1 auto}
+.ptab:hover{border-color:#3a4554}
+.ptab.on{border-color:var(--acc);background:#161d28;font-weight:600}
+.ptab .nm{overflow:hidden;text-overflow:ellipsis}
+.ptab .dirty{width:7px;height:7px;border-radius:50%;background:var(--acc);flex:none}
+.ptab .x{flex:none;border:0;background:none;color:var(--mut);cursor:pointer;width:20px;height:20px;border-radius:4px;line-height:1;padding:0;font-size:15px}
+.ptab .x:hover{background:#2a3340;color:#fff}
+.ptab-add{flex:none;width:28px;height:28px;border:1px dashed #3a4554;border-radius:6px;background:none;color:var(--mut);cursor:pointer;font-size:16px;line-height:1}
+.ptab-add:hover{color:#fff;border-color:var(--mut)}
+.split{display:inline-flex}.split .btn:first-child{border-radius:6px 0 0 6px}.split .caret{border-radius:0 6px 6px 0;border-left:0;padding:5px 7px}
+.dropdown{display:none;position:absolute;right:0;top:34px;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:5px;z-index:20;min-width:220px;box-shadow:0 8px 24px #0008}
+.dropdown.open{display:block}
+.dropdown button{display:flex;justify-content:space-between;gap:12px;width:100%;background:none;border:0;padding:7px 10px;border-radius:5px;cursor:pointer;text-align:left}
+.dropdown button:hover{background:#1c2430}
+.defscale{display:flex;justify-content:space-between;font:11px ui-monospace,Consolas,monospace;color:var(--mut);margin-top:2px}
 .sp{flex:1}
 .btn{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:5px 11px;cursor:pointer;white-space:nowrap}
 .btn:hover{border-color:#3a4554;background:#161d28}
@@ -92,17 +109,22 @@ kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;border:1px solid 
 #modal p,#modal li{color:#c5cfdb;margin:4px 0}#modal ul,#modal ol{padding-left:20px;margin:4px 0}
 #toast{position:fixed;left:50%;top:64px;transform:translateX(-50%);background:#2c1514;border:1px solid #7d302c;border-radius:8px;padding:9px 14px;z-index:60;display:none;max-width:560px}
 #toast.on{display:block}#toast.info{background:#12261b;border-color:#2d6b45}
+
+#top>*{flex:none}#top>#ptabs{flex:0 1 auto}#top>.sp{flex:1 1 0}
+.ptab-add{margin-left:2px}
+@media (max-width:1440px){.brandtxt{display:none}}
 </style></head><body>
 <div id="app">
   <header id="top">
     <div class="brand">
       <svg width="20" height="20" viewBox="0 0 20 20"><path d="M10 1.5 18 6v8l-8 4.5L2 14V6z" fill="none" stroke="#e8734f" stroke-width="1.8" stroke-linejoin="round"/><path d="M2 6l8 4.5L18 6M10 10.5v8" fill="none" stroke="#e8734f" stroke-width="1.8" stroke-linejoin="round"/></svg>
-      Analyse éléments finis 3D
+      <span class="brandtxt">Analyse éléments finis 3D</span>
     </div>
-    <div class="filetab" id="fname">Sans titre</div>
+    <div id="ptabs"></div><button class="ptab-add" data-act="newtab" title="Nouveau projet">+</button>
     <div class="sp"></div>
     <button class="btn" data-act="open">Ouvrir…</button>
-    <button class="btn" data-act="save">Enregistrer</button>
+    <div class="menu split"><button class="btn" data-act="save" title="Ctrl+S">Enregistrer</button><button class="btn caret" data-act="savemenu" title="Autres options d'enregistrement">▾</button>
+      <div id="saveMenu" class="dropdown"><button data-act="saveas">Enregistrer sous… <kbd>Ctrl+Maj+S</kbd></button></div></div>
     <button class="btn primary" data-act="calc">Calculer</button>
     <div class="seg" style="margin-left:8px">
       <button data-view="iso">Iso</button><button data-view="front">Face</button><button data-view="right">Droite</button><button data-view="top">Dessus</button>
@@ -129,7 +151,7 @@ kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;border:1px solid 
   <aside id="right"></aside>
   <footer id="status"><span id="stL"></span><span id="stR"></span></footer>
 </div>
-<input type="file" id="file" accept=".stl,.json" hidden>
+<input type="file" id="file" accept=".stl,.json" multiple hidden>
 <div id="modal"></div><div id="toast"></div>
 
 <script id="engine">
@@ -1567,13 +1589,15 @@ if (typeof module !== 'undefined') module.exports = FEA;
   const BCC = { fix: [0.33, 0.6, 1.0], pin: [0.2, 0.8, 0.72], disp: [0.68, 0.5, 1.0], force: [0.96, 0.78, 0.25] }, BCN = { fix: 'Appui fixe', pin: 'Axe / boulon', disp: 'Déplacement imposé', force: 'Force' };
   const hex = c => '#' + c.map(v => Math.round(v * 255).toString(16).padStart(2, '0')).join('');
 
-  const S = {
-    name: 'Sans titre', raw: null, unit: 'mm', tris: null, surf: null, gi: null, matIdx: 0, mat: Object.assign({}, MATS[0]),
+  /* chaque onglet est un projet : tout son état est dans un objet comme celui-ci (S = projet affiché) */
+  const newState = () => ({
+    name: 'Sans titre', dirty: false, handle: null, cam: null, defPos: null, raw: null, unit: 'mm', tris: null, surf: null, gi: null, matIdx: 0, mat: Object.assign({}, MATS[0]),
     h: 2, elType: 'hex', mesh: null, bcs: [], nextId: 1, activeBC: null, sel: null, selMode: 'auto', selTol: 20, hover: null, hoverSeed: -1,
-    tab: 'model', res: null, stale: false, resField: 'vm', showDef: true, defMult: 1, fsTarget: 1.5, forceUnit: 'N',
+    tab: 'model', res: null, stale: false, resField: 'vm', showDef: true, fsTarget: 1.5, forceUnit: 'N',
     showEdges: true, showGrid: true, showLabels: true, opt: { mode: 'vol', vf: 40, fs: 2, iters: 60, x: null, thr: 0.5, info: '', ver: null, ctx: null, colorVm: true }, busy: false, cancel: false, probe: null
-  };
-  window.__S = S;
+  });
+  let S = newState(); const PROJ = [S];
+  Object.defineProperty(window, '__S', { get: () => S }); window.__PROJ = PROJ;
 
   /* ================= Rendu WebGL ================= */
   const glc = $('#gl'), ovc = $('#ov'), gl = glc.getContext('webgl', { antialias: true }), ctx = ovc.getContext('2d');
@@ -1838,7 +1862,9 @@ if (typeof module !== 'undefined') module.exports = FEA;
     if (S.resField === 'fs') return { lo: 0, hi: 2 * S.fsTarget, unit: '', title: 'Facteur de sécurité', rev: true, val: p => S.mat.Sy / Math.max(vm[p], 1e-9) };
     return { lo: 0, hi: r.maxVm || 1, unit: 'MPa', title: 'Contrainte de von Mises', rev: false, val: p => vm[p] };
   }
-  function defScale() { const r = S.res; if (!S.showDef || !r || !r.maxD) return 0; return S.defMult * r.auto; }
+  /* curseur de déformée : position 0 → déformée réelle (× 1), position 1 → 2 × l'amplification automatique ; échelle logarithmique */
+  function defRange() { const a = S.res && S.res.auto > 0 ? S.res.auto : 1, lo = Math.min(1, a), hi = Math.max(1.001 * lo, 2 * a, 1); return { lo, hi, auto: a, pAuto: Math.log(a / lo) / Math.log(hi / lo) }; }
+  function defScale() { const r = S.res; if (!S.showDef || !r || !r.maxD) return 0; const g = defRange(), p = S.defPos === null ? g.pAuto : S.defPos; return g.lo * Math.pow(g.hi / g.lo, p); }
   function resBuffers() {
     const r = S.res;
     if (r && r.tet) {
@@ -1900,7 +1926,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     S.bcs = S.bcs.filter(b => b.tris.length);
     const n = S.bcs.filter(b => b.type === type).length + 1;
     const bc = { id: S.nextId++, type, name: (type === 'fix' ? 'Appui ' : type === 'pin' ? 'Axe ' : type === 'disp' ? 'Déplacement ' : 'Force ') + n, tris, v: [0, 0, 0], free: [false, false, false], bearing: false, c: centroid(tris) };
-    S.bcs.push(bc); S.activeBC = bc.id; S.sel.fill(0); S.stale = !!S.res; S.tab = 'study'; geoColors(); ui(); return bc;
+    S.bcs.push(bc); S.dirty = true; S.activeBC = bc.id; S.sel.fill(0); S.stale = !!S.res; S.tab = 'study'; geoColors(); ui(); return bc;
   }
   const meshOk = () => !!S.mesh && S.mesh.h === S.h && (S.elType === 'hex' || !!S.mesh.tet);
   function genMesh() {
@@ -2013,7 +2039,7 @@ onmessage = async e => {
     if (tet) { S.res = FEA.tet.tetResults(m.tet, S.mat.E, S.mat.nu, r.u); S.res.tet = m.tet; }
     else { S.res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.u); const dm = displayMesh(), si = FEA.surfaceInterp(m, dm.P, dm.N, S.res); S.res.sv = si.vm; S.res.sd = si.disp; }
     S.res.auto = S.res.maxD ? 0.05 * Math.hypot(...S.gi.size) / S.res.maxD : 0; S.res.iter = r.iter; S.res.spin = spin; S.res.rounds = p.pins ? r.rounds : 0; S.res.time = (performance.now() - t0) / 1000;
-    S.stale = false; S.tab = 'results'; resBuffers(); ui();
+    S.stale = false; S.defPos = null; S.tab = 'results'; resBuffers(); ui();
   }
   /* analyse de contrôle de la forme optimisée (éléments conservés seulement) */
   async function verifyOpt(lab) {
@@ -2078,25 +2104,85 @@ onmessage = async e => {
   function download(name, data, type) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([data], { type })); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
   function b64(f32) { const u = new Uint8Array(f32.buffer, f32.byteOffset, f32.byteLength); let s = ''; for (let i = 0; i < u.length; i += 32768) s += String.fromCharCode.apply(null, u.subarray(i, i + 32768)); return btoa(s); }
   function unb64(s) { const b = atob(s), u = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return new Float32Array(u.buffer); }
-  function save() {
-    if (!S.raw) { toast('Rien à enregistrer : chargez d\'abord une pièce.'); return; }
-    const o = { app: 'aef3d', version: 1, name: S.name, unit: S.unit, tris: b64(S.raw), matIdx: S.matIdx, mat: S.mat, h: S.h, elType: S.elType, fsTarget: S.fsTarget, forceUnit: S.forceUnit, selMode: S.selMode, selTol: S.selTol, opt: { mode: S.opt.mode, vf: S.opt.vf, fs: S.opt.fs, iters: S.opt.iters }, bcs: S.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick })) };
-    download(S.name.replace(/\.[^.]+$/, '') + '.aef.json', JSON.stringify(o), 'application/json');
+  const baseName = n => String(n || 'Sans titre').replace(/\.aef\.json$/i, '').replace(/\.(json|stl)$/i, '');
+  const PICK_TYPES = [{ description: 'Projet Analyse éléments finis 3D', accept: { 'application/json': ['.json'] } }];
+  function projectJSON(P) {
+    return JSON.stringify({ app: 'aef3d', version: 1, name: baseName(P.name), unit: P.unit, tris: b64(P.raw), matIdx: P.matIdx, mat: P.mat, h: P.h, elType: P.elType, fsTarget: P.fsTarget, forceUnit: P.forceUnit, selMode: P.selMode, selTol: P.selTol, opt: { mode: P.opt.mode, vf: P.opt.vf, fs: P.opt.fs, iters: P.opt.iters }, bcs: P.bcs.map(b => ({ type: b.type, name: b.name, tris: b.tris, v: b.v, free: b.free, bearing: !!b.bearing, stick: !!b.stick })) });
   }
-  function openFile(file) {
+  /* Enregistrer : la première fois, Chrome ouvre sa fenêtre pour choisir l'emplacement ; ensuite le même fichier est réécrit.
+     Enregistrer sous : la fenêtre s'ouvre toujours. Sans cette possibilité (autre navigateur), le fichier va dans Téléchargements. */
+  async function save(as) {
+    const P = S; if (!P.raw) { toast('Rien à enregistrer : chargez d\'abord une pièce.'); return false; }
+    const json = projectJSON(P), suggested = baseName(P.name) + '.aef.json';
+    if (!window.showSaveFilePicker) {
+      download(suggested, json, 'application/json'); P.dirty = false; ui();
+      toast('Ce navigateur ne permet pas de choisir l\'emplacement : le fichier « ' + suggested + ' » est dans Téléchargements.', true); return true;
+    }
+    try {
+      let h = !as && P.handle ? P.handle : null;
+      if (h && h.queryPermission && (await h.queryPermission({ mode: 'readwrite' })) !== 'granted' && (await h.requestPermission({ mode: 'readwrite' })) !== 'granted') h = null;
+      if (!h) h = await window.showSaveFilePicker({ suggestedName: suggested, types: PICK_TYPES });
+      const w = await h.createWritable(); await w.write(json); await w.close();
+      P.handle = h; P.name = baseName(h.name); P.dirty = false; ui(); toast('Projet enregistré : ' + h.name, true); return true;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return false;
+      toast('Enregistrement impossible (' + (err && err.message || err) + ').'); return false;
+    }
+  }
+  async function openDialog() {
+    if (!window.showOpenFilePicker) { $('#file').click(); return; }
+    try {
+      const hs = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'Pièce STL ou projet', accept: { 'model/stl': ['.stl'], 'application/json': ['.json'] } }] });
+      for (const h of hs) openFile(await h.getFile(), h);
+    } catch (err) { if (!err || err.name !== 'AbortError') toast('Ouverture impossible (' + (err && err.message || err) + ').'); }
+  }
+  /* un fichier ouvert va dans l'onglet courant s'il est vide, sinon dans un nouvel onglet */
+  function targetTab() { if (S.raw || S.dirty) { PROJ.push(newState()); activate(PROJ.length - 1); } }
+  function openFile(file, handle) {
     const rd = new FileReader();
     rd.onload = () => {
       try {
         if (/\.json$/i.test(file.name)) {
-          const o = JSON.parse(new TextDecoder().decode(rd.result)); if (o.app !== 'aef3d') throw new Error('format');
-          if (!loadGeometry(unb64(o.tris), o.name, o.unit)) return;
+          const o = JSON.parse(new TextDecoder().decode(rd.result)); if (o.app !== 'aef3d') throw new Error('ce n\'est pas un projet de cette application');
+          targetTab(); if (!loadGeometry(unb64(o.tris), o.name, o.unit)) return;
           S.matIdx = o.matIdx; S.mat = o.mat; S.h = o.h; S.elType = o.elType === 'tet' ? 'tet' : 'hex'; S.fsTarget = o.fsTarget || 1.5; S.forceUnit = o.forceUnit || 'N'; S.selMode = o.selMode || 'auto'; S.selTol = o.selTol || 20; Object.assign(S.opt, o.opt || {});
-          S.bcs = o.bcs.map(b => Object.assign({ id: S.nextId++, c: centroid(b.tris) }, b)); geoColors(); ui();
-        } else loadGeometry(FEA.parseSTL(rd.result), file.name);
-      } catch (err) { toast('Impossible de lire ce fichier (' + err.message + ').'); }
+          S.bcs = o.bcs.map(b => Object.assign({ id: S.nextId++, c: centroid(b.tris) }, b));
+          S.name = baseName(handle ? handle.name : file.name); S.handle = handle || null; S.dirty = false; geoColors(); ui();
+        } else { const raw = FEA.parseSTL(rd.result); targetTab(); if (loadGeometry(raw, baseName(file.name))) { S.dirty = true; ui(); } }
+      } catch (err) { toast('Impossible de lire « ' + file.name + ' » (' + err.message + ').'); }
     };
     rd.readAsArrayBuffer(file);
   }
+
+  /* ---------- onglets de projets ---------- */
+  const BUFS = ['geo', 'geoL', 'grid', 'mesh', 'meshL', 'res', 'resL', 'opt', 'optL'];
+  function activate(i) {
+    if (PROJ[i] === S) return;
+    S.cam = JSON.parse(JSON.stringify(R.cam)); S.hover = S.hoverMask = null; S.hoverSeed = -1; S.probe = null;
+    S = PROJ[i];
+    for (const b of BUFS) setBuf(b, null); R.picks = {};
+    if (S.tris) { geoBuffers(); meshBuffers(); resBuffers(); optBuffers(); if (S.cam) R.cam = JSON.parse(JSON.stringify(S.cam)); else fit(); }
+    $('#empty').style.display = S.raw ? 'none' : ''; ui();
+  }
+  function newProject() { PROJ.push(newState()); activate(PROJ.length - 1); }
+  function closeProject(i, force) {
+    const P = PROJ[i]; if (!P) return;
+    if (P.busy) { toast('Un calcul est en cours dans ce projet : arrêtez-le d\'abord.'); return; }
+    if (P.dirty && !force) {
+      $('#modal').innerHTML = `<div class="box" style="max-width:460px"><h2>Fermer « ${esc(baseName(P.name))} » ?</h2><p>Les modifications de ce projet n'ont pas été enregistrées.</p>
+      <div class="btns" style="justify-content:flex-end;margin-top:16px"><button class="btn" data-act="closemodal">Annuler</button><button class="btn" data-act="closenosave" data-i="${i}">Fermer sans enregistrer</button><button class="btn primary" data-act="closesave" data-i="${i}">Enregistrer</button></div></div>`;
+      $('#modal').classList.add('on'); return;
+    }
+    if (P === S) { const j = i > 0 ? i - 1 : 1; if (PROJ.length === 1) PROJ.push(newState()); activate(j < PROJ.length ? j : 0); }
+    PROJ.splice(PROJ.indexOf(P), 1); ui();
+  }
+  function renderTabs() {
+    $('#ptabs').innerHTML = PROJ.map((P, i) => `<div class="ptab ${P === S ? 'on' : ''}" data-ptab="${i}" title="${esc(baseName(P.name))}${P.handle ? ' — ' + esc(P.handle.name) : ''}">${P.dirty ? '<i class="dirty" title="Modifications non enregistrées"></i>' : ''}<span class="nm">${esc(baseName(P.name))}</span><button class="x" data-pclose="${i}" title="Fermer">×</button></div>`).join('');
+    const on = $('#ptabs .ptab.on'); if (on) on.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    document.title = baseName(S.name) + ' — Analyse éléments finis 3D';
+  }
+  window.addEventListener('beforeunload', e => { if (PROJ.some(P => P.dirty)) { e.preventDefault(); e.returnValue = ''; } });
+
   function exportOptSTL() {
     const f = S.opt.faces; if (!f || !f.n) return; const X = S.mesh.coords, buf = new ArrayBuffer(84 + f.n * 100), dv = new DataView(buf); dv.setUint32(80, f.n * 2, true); let o = 84;
     for (let i = 0; i < f.n; i++) for (const tri of [[0, 1, 2], [0, 2, 3]]) {
@@ -2106,10 +2192,10 @@ onmessage = async e => {
     download(S.name.replace(/\.[^.]+$/, '') + '_optimise.stl', buf, 'model/stl');
   }
   function loadDemo() {
-    const d = FEA.demoLink(); if (!loadGeometry(d.tris, 'Biellette (exemple)')) return;
+    targetTab(); const d = FEA.demoLink(); if (!loadGeometry(d.tris, 'Biellette (exemple)')) return;
     S.matIdx = 0; S.mat = Object.assign({}, MATS[0]); S.h = 2;
     addBC('pin', d.holeL); const f = addBC('force', d.holeR); f.v = [12000, 0, 0]; f.bearing = true;
-    S.activeBC = null; S.tab = 'model'; geoColors(); ui();
+    S.activeBC = null; S.tab = 'model'; S.dirty = false; geoColors(); ui();
   }
 
   /* ================= Interface ================= */
@@ -2191,7 +2277,10 @@ onmessage = async e => {
     <div class="row"><span>Déplacement maximal</span><span class="val">${fmt(r.maxD, 4)} mm</span></div><div class="row"><span>Facteur de sécurité visé</span>${num('fsTarget', S.fsTarget, 0.1)}</div></div>
     <div class="sec">AFFICHAGE</div><div class="seg full"><button data-res="vm" class="${S.resField === 'vm' ? 'on' : ''}">von Mises</button><button data-res="disp" class="${S.resField === 'disp' ? 'on' : ''}">Déplacement</button><button data-res="fs" class="${S.resField === 'fs' ? 'on' : ''}">Sécurité</button></div>
     <div class="row" style="margin-top:12px"><span><input type="checkbox" data-set="showDef" ${S.showDef ? 'checked' : ''}> Afficher la déformée</span></div>
-    <div class="row"><span>Amplification (× auto)</span>${num('defMult', S.defMult, 0.5)}</div>
+    ${(() => { const g = defRange(), p = S.defPos === null ? g.pAuto : S.defPos; return `<label class="f">Amplification de la déformée : <b id="defLbl" style="color:#fff">× ${fmt(defScale() || g.lo * Math.pow(g.hi / g.lo, p), 3)}</b></label>
+    <input type="range" min="0" max="1000" step="1" value="${Math.round(p * 1000)}" data-live="def" list="defTicks" ${S.showDef ? '' : 'disabled'}><datalist id="defTicks"><option value="0"></option><option value="${Math.round(g.pAuto * 1000)}"></option><option value="1000"></option></datalist>
+    <div class="defscale"><span>réelle × 1</span><span>auto × ${fmt(g.auto, 3)}</span><span>× ${fmt(g.hi, 3)}</span></div>
+    <div class="btns"><button class="btn" data-act="defreal">Réelle</button><button class="btn" data-act="defauto">Auto</button></div>`; })()}
     <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.${r.spin !== null && r.spin !== undefined ? '<br><br>Un seul axe tient la pièce : c\'est une articulation, et rien d\'autre ne l\'empêche de pivoter en bloc autour de lui. Ce pivotement (' + fmt(r.spin * 180 / Math.PI, 2) + '°) est retiré du déplacement et de la déformée affichés ; il n\'a aucun effet sur les contraintes. Si la pièce est tenue autrement en réalité, ajoutez cet appui.' : ''}<br><br>${r.tet ? fmt(r.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'} · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
   }
   function panelOpt() {
@@ -2245,7 +2334,7 @@ onmessage = async e => {
     const c = checks(), ok = { model: c.geo, mesh: c.mesh, study: c.sup > 0 && c.ld > 0, results: !!S.res && !S.stale, opt: !!S.opt.x };
     $('#steps').innerHTML = TABS.map(([k, n]) => `<button data-tab="${k}" class="${S.tab === k ? 'on' : ''}"><span class="dot ${ok[k] ? 'ok' : (k === 'results' && S.res ? 'warn' : '')}">${ok[k] ? '✓' : ''}</span>${n}</button>`).join('');
     $('#panel').innerHTML = { model: panelModel, mesh: panelMesh, study: panelStudy, results: panelResults, opt: panelOpt }[S.tab]();
-    $('#right').innerHTML = rightPanel(); $('#fname').textContent = S.name;
+    $('#right').innerHTML = rightPanel(); renderTabs();
     $('#stL').textContent = S.mesh && S.elType === 'tet' && S.mesh.tet ? fmt(S.mesh.tet.nn, 7) + ' nœuds · ' + fmt(S.mesh.tet.nt, 7) + ' tétraèdres' : S.mesh ? fmt(S.mesh.nn, 7) + ' nœuds · ' + fmt(S.mesh.ne, 7) + ' éléments' : S.tris ? fmt(S.surf.nt, 7) + ' triangles' : 'Aucune pièce';
     $('#stR').textContent = 'Axe vertical Y · mm · ' + S.forceUnit + ' · MPa';
     legend(); R.need = true;
@@ -2253,31 +2342,41 @@ onmessage = async e => {
 
   /* ---------- événements ---------- */
   const ACT = {
-    open: () => $('#file').click(), import: () => $('#file').click(), demo: loadDemo, save, calc, fit, stop,
+    open: openDialog, import: openDialog, demo: loadDemo, save: () => save(false), saveas: () => { $('#saveMenu').classList.remove('open'); save(true); }, calc, fit, stop,
+    savemenu: () => $('#saveMenu').classList.toggle('open'), newtab: newProject,
+    closenosave: el => { $('#modal').classList.remove('on'); closeProject(+el.dataset.i, true); },
+    closesave: async el => { $('#modal').classList.remove('on'); const i = +el.dataset.i, P = PROJ[i]; if (P !== S) activate(i); if (await save(false)) closeProject(PROJ.indexOf(P), true); },
+    defreal: () => { S.defPos = 0; resBuffers(); ui(); }, defauto: () => { S.defPos = null; resBuffers(); ui(); },
     menu: () => $('#viewMenu').classList.toggle('open'), help,
     mesh: () => { if (genMesh()) ui(); }, hfine: () => { S.h = +(S.h / 1.25).toPrecision(3); ui(); }, hcoarse: () => { S.h = +(S.h * 1.25).toPrecision(3); ui(); },
     addfix: () => addBC('fix'), addpin: () => addBC('pin'), verify: runVerify, adddisp: () => addBC('disp'), addforce: () => addBC('force'), clearsel: () => { S.sel.fill(0); geoColors(); ui(); },
     bc: el => { const id = +el.dataset.id; S.activeBC = S.activeBC === id ? null : id; geoColors(); ui(); },
-    bcdel: () => { S.bcs = S.bcs.filter(b => b.id !== S.activeBC); S.activeBC = null; S.stale = !!S.res; geoColors(); ui(); },
+    bcdel: () => { S.dirty = true; S.bcs = S.bcs.filter(b => b.id !== S.activeBC); S.activeBC = null; S.stale = !!S.res; geoColors(); ui(); },
     bcsel: () => { const b = S.bcs.find(x => x.id === S.activeBC); if (b) { S.sel.fill(0); for (const t of b.tris) S.sel[t] = 1; geoColors(); ui(); } },
     opt: runOpt, optstl: exportOptSTL, closemodal: () => $('#modal').classList.remove('on')
   };
   document.addEventListener('click', e => {
+    if (!e.target.closest('.menu')) { $('#viewMenu').classList.remove('open'); $('#saveMenu').classList.remove('open'); }
+    const pc = e.target.closest('[data-pclose]');
+    if (pc) { e.stopPropagation(); if (S.busy) { toast('Un calcul est en cours : arrêtez-le avant de changer de projet.'); return; } closeProject(+pc.dataset.pclose); return; }
+    const pt = e.target.closest('[data-ptab]');
+    if (pt) { if (S.busy && PROJ[+pt.dataset.ptab] !== S) { toast('Un calcul est en cours : arrêtez-le avant de changer de projet.'); return; } activate(+pt.dataset.ptab); return; }
     const t = e.target.closest('[data-act],[data-tab],[data-view],[data-res],[data-mode],[data-optmode],[data-eltype]');
-    if (!e.target.closest('.menu')) $('#viewMenu').classList.remove('open');
     if (!t || t.disabled) return; const d = t.dataset;
-    if (d.act) { if (S.busy && d.act !== 'stop' && d.act !== 'help' && d.act !== 'closemodal' && d.act !== 'menu' && d.act !== 'fit') return; ACT[d.act](t); }
+    if (d.act) { if (S.busy && !['stop', 'help', 'closemodal', 'menu', 'fit', 'defreal', 'defauto'].includes(d.act)) { if (['newtab', 'open', 'demo', 'import'].includes(d.act)) toast('Un calcul est en cours : arrêtez-le avant d\'ouvrir un autre projet.'); return; } ACT[d.act](t); }
     else if (d.tab) { S.tab = d.tab; S.probe = null; geoColors(); optBuffers(); if (d.tab === 'results') resBuffers(); ui(); }
     else if (d.view) setView(d.view);
     else if (d.res) { S.resField = d.res; S.probe = null; resBuffers(); ui(); }
-    else if (d.eltype) { if (!S.busy && S.elType !== d.eltype) { S.elType = d.eltype; if (S.gi) S.h = +(defaultH() * (d.eltype === 'tet' ? 2 : 1)).toPrecision(2); S.res = null; resBuffers(); ui(); } }
-    else if (d.optmode) { if (!S.busy) { S.opt.mode = d.optmode; ui(); } }
+    else if (d.eltype) { if (!S.busy && S.elType !== d.eltype) { S.elType = d.eltype; S.dirty = true; if (S.gi) S.h = +(defaultH() * (d.eltype === 'tet' ? 2 : 1)).toPrecision(2); S.res = null; resBuffers(); ui(); } }
+    else if (d.optmode) { if (!S.busy) { S.opt.mode = d.optmode; S.dirty = true; ui(); } }
     else if (d.mode) { S.selMode = d.mode; S.hoverSeed = -1; S.hoverMask = null; ui(); }
   });
+  const VIEW_ONLY = new Set(['showEdges', 'showGrid', 'showLabels', 'showDef', 'opt.thr', 'opt.colorVm', 'selTol', 'fsTarget']);
   document.addEventListener('change', e => {
     const el = e.target, p = el.dataset.set; if (!p) return;
     const v = el.type === 'checkbox' ? el.checked : (el.type === 'number' || el.type === 'range' || el.dataset.num) ? parseFloat(el.value) : el.value;
     if ((el.type === 'number' || el.type === 'range') && !isFinite(v)) { ui(); return; }
+    if (!VIEW_ONLY.has(p)) S.dirty = true;
     const b = S.bcs.find(x => x.id === S.activeBC);
     if (p.startsWith('bc.')) {
       if (!b) return; const k = p.slice(3);
@@ -2290,21 +2389,33 @@ onmessage = async e => {
     else if (p === 'h') { if (v > 0) S.h = v; }
     else if (p === 'selTol') { S.selTol = Math.max(1, Math.min(60, v)); S.hoverSeed = -1; S.hoverMask = null; }
     else if (p === 'fsTarget') { if (v > 0) S.fsTarget = v; resBuffers(); }
-    else { S[p] = v; if (p === 'showDef' || p === 'defMult') resBuffers(); }
+    else { S[p] = v; if (p === 'showDef') resBuffers(); }
     ui();
   });
-  $('#file').addEventListener('change', e => { if (e.target.files[0]) openFile(e.target.files[0]); e.target.value = ''; });
+  let defRaf = 0;
+  document.addEventListener('input', e => {
+    const el = e.target; if (el.dataset.live !== 'def') return;
+    S.defPos = +el.value / 1000; const l = $('#defLbl'); if (l) l.textContent = '× ' + fmt(defScale(), 3);
+    if (!defRaf) defRaf = requestAnimationFrame(() => { defRaf = 0; resBuffers(); legend(); });
+  });
+  $('#file').addEventListener('change', e => { for (const f of e.target.files) openFile(f); e.target.value = ''; });
   const view = $('#view');
   view.addEventListener('dragover', e => e.preventDefault());
-  view.addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0] && !S.busy) openFile(e.dataTransfer.files[0]); });
-  window.addEventListener('keydown', e => { if (e.key === 'Escape') { $('#modal').classList.remove('on'); if (S.sel && selectable() && !/INPUT|SELECT/.test(document.activeElement.tagName)) { S.sel.fill(0); geoColors(); ui(); } } });
+  view.addEventListener('drop', e => { e.preventDefault(); if (S.busy) return; for (const f of e.dataTransfer.files) openFile(f); });
+  window.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+      const k = e.key.toLowerCase();
+      if (k === 's') { e.preventDefault(); if (!S.busy) save(e.shiftKey); return; }
+      if (k === 'o') { e.preventDefault(); if (!S.busy) openDialog(); return; }
+    }
+    if (e.key === 'Escape') { $('#saveMenu').classList.remove('open'); $('#modal').classList.remove('on'); if (S.sel && selectable() && !/INPUT|SELECT/.test(document.activeElement.tagName)) { S.sel.fill(0); geoColors(); ui(); } } });
   function help() {
     $('#modal').innerHTML = `<div class="box"><h2>Analyse éléments finis 3D — aide</h2>
     <h3>Déroulement</h3><ol><li><b>Modèle</b> : importez le STL de la pièce, vérifiez les dimensions et choisissez le matériau.</li><li><b>Maillage</b> : réglez la taille d'élément et générez le maillage.</li><li><b>Étude</b> : cliquez les faces dans la vue, puis créez les appuis et les forces (panneau de droite).</li><li><b>Calculer</b>, puis lisez le bilan dans <b>Résultats</b>.</li><li><b>Optimisation</b> (facultatif) : cherchez la matière inutile sous le même cas de charge, en visant une quantité de matière ou un facteur de sécurité.</li></ol>
     <h3>Exporter depuis SolidWorks</h3><p>Fichier › Enregistrer sous › STL (*.stl). Dans Options : unité « Millimètres », résolution « Fine ». Une résolution fine donne des alésages plus ronds et des sélections de faces plus propres.</p>
     <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>Deux maillages au choix : des cubes coupés par la vraie surface (robuste, sert aussi à l'optimisation), ou des tétraèdres à 10 nœuds (plus précis à nombre d'éléments égal). Plus les éléments sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide et sans jeu, et la matière glisse autour de lui (ou non, avec l'option « Boulon serré »).</li></ul>
     <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis fixes et dans les angles rentrants vifs sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
-    <h3>Souris</h3><p>Clic gauche : tourner · clic droit : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p>
+    <h3>Projets</h3><p>Chaque onglet en haut est un projet ; « + » en crée un nouveau. Ouvrir un fichier l'ouvre dans un nouvel onglet. Un point orange signale des modifications non enregistrées. <kbd>Ctrl+S</kbd> : enregistrer (la première fois, choix de l'emplacement) · <kbd>Ctrl+Maj+S</kbd> : enregistrer sous · <kbd>Ctrl+O</kbd> : ouvrir.</p><h3>Souris</h3><p>Clic gauche : tourner · clic droit : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p>
     <div class="btns" style="justify-content:flex-end"><button class="btn primary" data-act="closemodal">Fermer</button></div></div>`;
     $('#modal').classList.add('on');
   }
