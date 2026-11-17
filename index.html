@@ -146,7 +146,7 @@ kbd{font-family:ui-monospace,Consolas,monospace;font-size:11px;border:1px solid 
     <div id="empty"><div><b>Aucune pièce chargée</b>Glissez un fichier STL ici, ou utilisez « Importer un STL… » dans l'onglet Modèle. Vous pouvez aussi charger la pièce d'exemple.</div></div>
     <div id="legend"></div>
     <div id="prog"><div style="flex:1"><div id="progT"></div><div class="pb"><i id="progB"></i></div></div><button class="btn" data-act="stop">Arrêter</button></div>
-    <div id="hint">Clic gauche : tourner · Clic droit : déplacer · Molette : zoom</div>
+    <div id="hint">Clic gauche : tourner · Clic droit glissé : déplacer · Molette : zoom · Clic droit : épingler une valeur</div>
   </main>
   <aside id="right"></aside>
   <footer id="status"><span id="stL"></span><span id="stR"></span></footer>
@@ -1732,7 +1732,9 @@ if (typeof module !== 'undefined') module.exports = FEA;
     for (let it = 1; it <= iters; it++) {
       filt(x, xt); proj(xt, xp, dp);
       for (let e = 0; e < ne; e++) esc[e] = Emin + Math.pow(xp[e], pen) * (1 - Emin);
+      const tq = Date.now();
       const r = await tetPcg({ tm, hex, lam, mu, Ke: o.Ke, hexScale: hexScaleFrom(tm, hex, esc, E), hexFixed: o.hexFixed, hexNb: o.hexNb, fixed: o.fixed, x: u, f: o.f, nb: o.nb, esc, tol: 1e-3, maxIter: 3000, tick: o.tick ? (i, res) => o.tick(it, i, res) : null });
+      if (DBG.pcg) DBG.pcg.push([r.iter, Date.now() - tq]);
       if (r.cancelled) return { x: xp, xd: x, cancelled: true, iter: it, fs, beta };
       if (fsMode) {
         fs = o.Sy / Math.max(1e-12, tetResults(tm, E, nu, u, xp).maxVm);
@@ -1832,7 +1834,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
 
   /* chaque onglet est un projet : tout son état est dans un objet comme celui-ci (S = projet affiché) */
   const newState = () => ({
-    name: 'Sans titre', dirty: false, handle: null, cam: null, defPos: null, raw: null, unit: 'mm', tris: null, surf: null, gi: null, matIdx: 0, mat: Object.assign({}, MATS[0]),
+    name: 'Sans titre', dirty: false, handle: null, cam: null, defPos: null, labels: [], showMaxLabel: true, raw: null, unit: 'mm', tris: null, surf: null, gi: null, matIdx: 0, mat: Object.assign({}, MATS[0]),
     h: 2, elType: 'hex', mesh: null, bcs: [], nextId: 1, activeBC: null, sel: null, selMode: 'auto', selTol: 20, hover: null, hoverSeed: -1,
     tab: 'model', res: null, stale: false, resField: 'vm', showDef: true, fsTarget: 1.5, forceUnit: 'N',
     showEdges: true, showGrid: true, showLabels: true, opt: { mode: 'vol', vf: 40, fs: 2, iters: 60, x: null, thr: 0.5, info: '', ver: null, ctx: null, colorVm: true }, busy: false, cancel: false, probe: null
@@ -1842,7 +1844,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
 
   /* ================= Rendu WebGL ================= */
   const glc = $('#gl'), ovc = $('#ov'), gl = glc.getContext('webgl', { antialias: true }), ctx = ovc.getContext('2d');
-  const R = { bufs: {}, cam: { t: [0, 0, 0], d: 300, yaw: 0.7, pitch: 0.45 }, need: true, w: 1, h: 1, mvp: null, picks: {}, fov: 32 * Math.PI / 180 };
+  const R = window.__R = { bufs: {}, cam: { t: [0, 0, 0], d: 300, yaw: 0.7, pitch: 0.45 }, need: true, w: 1, h: 1, mvp: null, picks: {}, fov: 32 * Math.PI / 180 };
   const sh = (t, s) => { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o); return o; };
   const prog = gl.createProgram();
   gl.attachShader(prog, sh(gl.VERTEX_SHADER, 'attribute vec3 aP,aN,aC;uniform mat4 uM;uniform mat3 uN;varying vec3 vC,vN;void main(){vC=aC;vN=uN*aN;gl_Position=uM*vec4(aP,1.);}'));
@@ -1916,7 +1918,9 @@ if (typeof module !== 'undefined') module.exports = FEA;
       const dx = (a[0] * x[0] + a[1] * x[1] + a[2] * x[2]) * 30, dy = -(a[0] * y[0] + a[1] * y[1] + a[2] * y[2]) * 30;
       ctx.strokeStyle = ctx.fillStyle = a[3]; ctx.beginPath(); ctx.moveTo(o[0], o[1]); ctx.lineTo(o[0] + dx, o[1] + dy); ctx.stroke(); ctx.fillText(a[4], o[0] + dx * 1.3 - 3, o[1] + dy * 1.3 + 3);
     }
-    if (!S.tris || !S.showLabels) return;
+    if (!S.tris) return;
+    valueLabels();
+    if (!S.showLabels) return;
     ctx.font = 'bold 11px ui-monospace,Consolas,monospace';
     for (const b of S.bcs) {
       const p = project(b.c); if (!p) continue;
@@ -1931,6 +1935,87 @@ if (typeof module !== 'undefined') module.exports = FEA;
       ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(p[0] - ux * 10 - uy * 4, p[1] - uy * 10 + ux * 4); ctx.lineTo(p[0] - ux * 10 + uy * 4, p[1] - uy * 10 - ux * 4); ctx.fill();
       ctx.fillText(lab, q[0] - ctx.measureText(lab).width / 2, q[1] - 7);
     }
+  }
+
+  /* ---------- étiquettes de valeurs dans la vue 3D ----------
+     Résultats : une étiquette référence un nœud (tétraèdres : nœud du maillage ; cubes coupés : point de la surface affichée,
+     dont la valeur est celle de la couleur), et suit la déformée et le champ affiché.
+     Optimisation : position et valeur figées sur la forme vérifiée. */
+  function resLabelInfo(L, k) {
+    const r = S.res, X = L.src === 'node' ? (r.tet ? r.tet.coords : S.mesh.coords) : S.dsp.P, U = L.src === 'node' ? r.u : r.sd, i = L.i * 3;
+    const pos = [X[i] + U[i] * k, X[i + 1] + U[i + 1] * k, X[i + 2] + U[i + 2] * k];
+    const vm = L.src === 'node' ? r.vmN[L.i] : r.sv[L.i], d = L.src === 'node' ? (r.dN ? r.dN[L.i] : Math.hypot(r.u[i], r.u[i + 1], r.u[i + 2])) : Math.hypot(U[i], U[i + 1], U[i + 2]);
+    const txt = S.resField === 'disp' ? fmt(d, 4) + ' mm' : S.resField === 'fs' ? 'FS ' + fmt(S.mat.Sy / Math.max(vm, 1e-9), 3) : fmt(vm, 4) + ' MPa';
+    return { pos, txt };
+  }
+  /* nœud du maximum (ou du facteur de sécurité minimal) parmi les nœuds en pleine matière */
+  function resMaxLabel() {
+    const r = S.res; let best = -1, bi = -1; const disp = S.resField === 'disp', w = r.wN;
+    for (let n = 0, N = r.vmN.length; n < N; n++) { if (w && !(w[n] >= 1)) continue; const v = disp ? r.dN[n] : r.vmN[n]; if (v > best) { best = v; bi = n; } }
+    return bi < 0 ? null : { src: 'node', i: bi };
+  }
+  function optMaxLabel(v) {
+    const X = optTet() ? S.mesh.tet.coords : S.mesh.coords; let best = -1, bi = -1;
+    for (let n = 0; n < v.vmN.length; n++) { if (v.wN && !(v.wN[n] >= 1)) continue; if (v.vmN[n] > best) { best = v.vmN[n]; bi = n; } }
+    return bi < 0 ? null : { pos: [X[bi * 3], X[bi * 3 + 1], X[bi * 3 + 2]], txt: fmt(best, 4) + ' MPa' };
+  }
+  /* point caché derrière la pièce ? (rayon depuis la caméra sur la surface affichée) */
+  function hidden(P, pos) {
+    if (!P) return false; const { eye } = camBasis(), d = [pos[0] - eye[0], pos[1] - eye[1], pos[2] - eye[2]], L = Math.hypot(d[0], d[1], d[2]); if (!(L > 0)) return false;
+    const h = pickTri(P, eye, [d[0] / L, d[1] / L, d[2] / L]); return !!h && h.t < L - Math.max(0.01 * L, 0.6 * (S.mesh ? S.mesh.h : 1));
+  }
+  function tag(px, py, txt, max, dim) {
+    /* point caché derrière la pièce : étiquette un peu estompée, contour en pointillé, mais toujours lisible */
+    ctx.globalAlpha = dim ? 0.72 : 1; ctx.setLineDash(dim ? [3, 3] : []); const col = max ? '#e8734f' : '#e6edf3';
+    ctx.font = '600 12px ui-monospace,Consolas,monospace'; const w = ctx.measureText(txt).width + 14, hh = 22, left = px + 16 + w > R.w - 4;
+    const bx = left ? px - 16 - w : px + 16, by = Math.max(4, py - 34);
+    ctx.strokeStyle = ctx.fillStyle = col; ctx.lineWidth = 1.2; ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(left ? bx + w : bx, by + hh); ctx.stroke();
+    ctx.beginPath(); ctx.arc(px, py, 3.2, 0, 7); if (dim) { ctx.setLineDash([]); ctx.stroke(); ctx.setLineDash([3, 3]); } else ctx.fill();
+    ctx.fillStyle = '#10161ef0'; ctx.beginPath(); ctx.roundRect ? ctx.roundRect(bx, by, w, hh, 5) : ctx.rect(bx, by, w, hh); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = col; ctx.fillText(txt, bx + 7, by + 15); ctx.globalAlpha = 1; ctx.setLineDash([]);
+    return { x: bx, y: by, w, h: hh };
+  }
+  function valueLabels() {
+    R.labelBoxes = [];
+    const busyView = performance.now() < (R.interactUntil || 0); /* pendant une rotation, pas de test de visibilité (coûteux) */
+    if (busyView && !R.relabel) R.relabel = setTimeout(() => { R.relabel = 0; R.need = true; }, 220);
+    const items = [];
+    if (S.tab === 'results' && S.res && R.picks.res && (!S.res.tet || S.res.tet === (S.mesh && S.mesh.tet))) {
+      const k = defScale(), P = R.picks.res.pos;
+      for (const L of S.labels) if (L.tab === 'results' && L.mesh === S.mesh && (L.src === 'node' ? true : S.dsp && S.dsp.mesh === S.mesh)) items.push([resLabelInfo(L, k), false, L, P]);
+      if (S.showMaxLabel) { const m = resMaxLabel(); if (m) { const inf = resLabelInfo(m, k); inf.txt = (S.resField === 'fs' ? 'min ' : 'max ') + inf.txt; items.push([inf, true, null, P]); } }
+    } else if (S.tab === 'opt' && S.opt.x && !S.busy) {
+      const v = S.opt.colorVm ? verOk() : null, P = R.picks.opt ? R.picks.opt.pos : null;
+      if (v) {
+        for (const L of S.labels) if (L.tab === 'opt' && L.ver === v) items.push([L, false, L, P]);
+        if (S.showMaxLabel) { const m = optMaxLabel(v); if (m) { m.txt = 'max ' + m.txt; items.push([m, true, null, P]); } }
+      }
+    }
+    for (const [inf, max, L, P] of items) {
+      const p = project(inf.pos); if (!p || p[0] < -50 || p[1] < -50 || p[0] > R.w + 50 || p[1] > R.h + 50) continue;
+      const b = tag(p[0], p[1], inf.txt, max, !busyView && hidden(P, inf.pos));
+      if (L) R.labelBoxes.push(Object.assign(b, { L }));
+    }
+  }
+  /* clic droit sans glisser : retirer l'étiquette visée, sinon épingler le nœud le plus proche du point cliqué */
+  function rclick(e) {
+    const rc = ovc.getBoundingClientRect(), mx = e.clientX - rc.left, my = e.clientY - rc.top;
+    for (const b of R.labelBoxes || []) if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) { S.labels.splice(S.labels.indexOf(b.L), 1); R.need = true; ui(); return; }
+    const r = ray(e);
+    if (S.tab === 'results' && S.res && R.picks.res) {
+      const PK = R.picks.res, h = pickTri(PK.pos, r.o, r.d); if (!h) return;
+      const hit = [r.o[0] + r.d[0] * h.t, r.o[1] + r.d[1] * h.t, r.o[2] + r.d[2] * h.t]; let bd = Infinity, bv = -1;
+      for (let q = 0; q < 3; q++) { const v = h.idx * 3 + q, d = (PK.pos[v * 3] - hit[0]) ** 2 + (PK.pos[v * 3 + 1] - hit[1]) ** 2 + (PK.pos[v * 3 + 2] - hit[2]) ** 2; if (d < bd) { bd = d; bv = v; } }
+      const L = PK.idx ? { tab: 'results', mesh: S.mesh, src: 'node', i: PK.idx[bv] } : { tab: 'results', mesh: S.mesh, src: 'dsp', i: bv };
+      if (!S.labels.some(o => o.tab === 'results' && o.mesh === L.mesh && o.src === L.src && o.i === L.i)) S.labels.push(L);
+    } else if (S.tab === 'opt' && R.picks.opt) {
+      const v = verOk(); if (!v) return; const PK = R.picks.opt, h = pickTri(PK.pos, r.o, r.d); if (!h) return;
+      const hit = [r.o[0] + r.d[0] * h.t, r.o[1] + r.d[1] * h.t, r.o[2] + r.d[2] * h.t]; let pos = null, val = 0;
+      if (PK.vals) { let bd = Infinity; for (let q = 0; q < 3; q++) { const w = h.idx * 3 + q, d = (PK.pos[w * 3] - hit[0]) ** 2 + (PK.pos[w * 3 + 1] - hit[1]) ** 2 + (PK.pos[w * 3 + 2] - hit[2]) ** 2; if (d < bd) { bd = d; pos = [PK.pos[w * 3], PK.pos[w * 3 + 1], PK.pos[w * 3 + 2]]; val = PK.vals[w]; } } }
+      else { const f = h.idx >> 1, X = S.mesh.coords; let bd = Infinity; for (let k = 0; k < 4; k++) { const n = PK.quads[f * 4 + k], d = (X[n * 3] - hit[0]) ** 2 + (X[n * 3 + 1] - hit[1]) ** 2 + (X[n * 3 + 2] - hit[2]) ** 2; if (d < bd) { bd = d; pos = [X[n * 3], X[n * 3 + 1], X[n * 3 + 2]]; val = PK.val(n); } } }
+      S.labels.push({ tab: 'opt', ver: v, pos, txt: fmt(val, 4) + ' MPa' });
+    } else return;
+    R.need = true; ui();
   }
   (function loop() { if (R.need) draw(); requestAnimationFrame(loop); })();
   new ResizeObserver(() => { R.need = true; }).observe(glc);
@@ -1969,11 +2054,11 @@ if (typeof module !== 'undefined') module.exports = FEA;
       if (!drag.moved) return; drag.x = e.clientX; drag.y = e.clientY; const c = R.cam;
       if (drag.b === 0) { c.yaw -= dx * 0.008; c.pitch = Math.max(-1.57, Math.min(1.57, c.pitch + dy * 0.008)); }
       else { const { x, y } = camBasis(), k = c.d * 2 * Math.tan(R.fov / 2) / R.h; for (let i = 0; i < 3; i++) c.t[i] += (-x[i] * dx + y[i] * dy) * k; }
-      R.need = true;
+      R.need = true; R.interactUntil = performance.now() + 200;
     } else if (e.target === ovc) hoverEv = e;
   });
-  window.addEventListener('mouseup', e => { if (drag && !drag.moved && drag.b === 0 && e.target === ovc) click(e); drag = null; });
-  ovc.addEventListener('wheel', e => { e.preventDefault(); R.cam.d *= Math.exp(e.deltaY * 0.0012); R.need = true; }, { passive: false });
+  window.addEventListener('mouseup', e => { if (drag && !drag.moved && e.target === ovc) { if (drag.b === 0) click(e); else if (drag.b === 2 && !S.busy) rclick(e); } if (drag && drag.moved) R.need = true; drag = null; });
+  ovc.addEventListener('wheel', e => { e.preventDefault(); R.cam.d *= Math.exp(e.deltaY * 0.0012); R.need = true; R.interactUntil = performance.now() + 200; }, { passive: false });
   ovc.addEventListener('mouseleave', () => { hoverEv = null; if (S.hover) { S.hover = null; S.hoverSeed = -1; geoColors(); } });
   setInterval(() => { if (!hoverEv || drag || S.busy) return; const e = hoverEv; hoverEv = null; hover(e); }, 40);
   const selectable = () => S.tris && (S.tab === 'model' || S.tab === 'study');
@@ -2074,7 +2159,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
       for (let f = 0; f < nf; f++) for (let q = 0; q < 12; q++) { const n = bf[f * 6 + E6[q]], o = (f * 12 + q) * 3; L[o] = X[n * 3]; L[o + 1] = X[n * 3 + 1]; L[o + 2] = X[n * 3 + 2]; }
       setBuf(name + 'L', { pos: L, lines: true, color: [0.05, 0.07, 0.09] });
     }
-    return { pos, vals };
+    return { pos, vals, idx };
   }
   function meshBuffers() {
     const m = S.mesh; if (!m) return;
@@ -2111,7 +2196,7 @@ if (typeof module !== 'undefined') module.exports = FEA;
     if (r && r.tet) {
       if (r.tet !== (S.mesh && S.mesh.tet)) { setBuf('res', null); R.picks.res = null; return; }
       const g = resRange(), o = tetFaceBuffers('res', r.tet, r.u, defScale(), n => { const v = g.val(n), t = (v - g.lo) / (g.hi - g.lo); return { v, t: g.rev ? 1 - t : t }; }, null, false);
-      R.picks.res = { pos: o.pos, vals: o.vals, unit: g.unit }; return;
+      R.picks.res = { pos: o.pos, vals: o.vals, unit: g.unit, idx: o.idx }; return;
     }
     if (!r || !S.dsp || S.dsp.mesh !== S.mesh) { setBuf('res', null); R.picks.res = null; return; }
     const g = resRange(), k = defScale(), P = S.dsp.P, np = P.length / 3, pos = new Float32Array(P.length), col = new Float32Array(P.length), vals = new Float32Array(np);
@@ -2311,7 +2396,7 @@ onmessage = async e => {
     if (r.cancelled) return null;
     if (!r.converged) { S.opt.ver = { fail: true, thr: S.opt.thr, mesh: m }; return null; }
     const res = FEA.computeResults(m, S.mat.E, S.mat.nu, r.x, mask);
-    return S.opt.ver = { vmN: res.vmN, maxVm: res.maxVm, p99: res.p99, maxD: res.maxD, fs: S.mat.Sy / res.maxVm, thr: S.opt.thr, mesh: m, kept };
+    return S.opt.ver = { vmN: res.vmN, wN: res.wN, maxVm: res.maxVm, p99: res.p99, maxD: res.maxD, fs: S.mat.Sy / res.maxVm, thr: S.opt.thr, mesh: m, kept };
   }
   async function runVerify() {
     if (S.busy || !S.opt.x) return; S.busy = true; S.cancel = false; ui(); setProg(true, 'Vérification de la forme…', 0); await frame();
@@ -2551,8 +2636,12 @@ onmessage = async e => {
     <input type="range" min="0" max="1000" step="1" value="${Math.round(p * 1000)}" data-live="def" list="defTicks" ${S.showDef ? '' : 'disabled'}><datalist id="defTicks"><option value="0"></option><option value="${Math.round(g.pAuto * 1000)}"></option><option value="1000"></option></datalist>
     <div class="defscale"><span>réelle × 1</span><span>auto × ${fmt(g.auto, 3)}</span><span>× ${fmt(g.hi, 3)}</span></div>
     <div class="btns"><button class="btn" data-act="defreal">Réelle</button><button class="btn" data-act="defauto">Auto</button></div>`; })()}
+    <div class="sec">ÉTIQUETTES</div><div class="row"><span><input type="checkbox" data-set="showMaxLabel" ${S.showMaxLabel ? 'checked' : ''}> Étiquette du ${S.tab === 'results' && S.resField === 'fs' ? 'minimum' : 'maximum'}</span></div>
+    <div class="mut small">Clic droit sur la pièce : épingler la valeur du nœud le plus proche. Clic droit sur une étiquette : la retirer.</div>
+    <div class="btns"><button class="btn" data-act="clearlabels" ${nLab() ? '' : 'disabled'}>Effacer les étiquettes (${nLab()})</button></div>
     <div class="sec">À SAVOIR</div><div class="mut small">Les résultats sont affichés sur la vraie surface de la pièce. Comme dans tout calcul par éléments finis, la contrainte reste théoriquement infinie au bord d'un appui fixe et dans un angle rentrant vif : si le maximum s'y trouve et monte sans cesse en affinant, c'est un pic numérique. Ailleurs, affinez le maillage jusqu'à ce que le maximum se stabilise.${r.spin !== null && r.spin !== undefined ? '<br><br>Un seul axe tient la pièce : c\'est une articulation, et rien d\'autre ne l\'empêche de pivoter en bloc autour de lui. Ce pivotement (' + fmt(r.spin * 180 / Math.PI, 2) + '°) est retiré du déplacement et de la déformée affichés ; il n\'a aucun effet sur les contraintes. Si la pièce est tenue autrement en réalité, ajoutez cet appui.' : ''}<br><br>${r.tet ? fmt(r.tet.nt, 7) + ' tétraèdres' : fmt(S.mesh.ne, 7) + ' éléments'} · ${r.rounds ? r.rounds + ' passes de contact · ' : ''}${fmt(r.time, 2)} s</div>`;
   }
+  const nLab = () => S.labels.filter(L => S.tab === 'opt' ? L.tab === 'opt' && L.ver === verOk() : L.tab === 'results' && L.mesh === S.mesh).length;
   function panelOpt() {
     if (!S.tris) return `<div class="sec">OPTIMISATION TOPOLOGIQUE</div><div class="mut">Chargez d'abord une pièce dans l'onglet Modèle.</div>`;
     const o = S.opt, fsM = o.mode === 'fs', c = o.ctx && o.ctx.mesh === S.mesh ? o.ctx : null;
@@ -2573,6 +2662,9 @@ onmessage = async e => {
       <div class="row"><span><input type="checkbox" data-set="opt.colorVm" ${o.colorVm ? 'checked' : ''}> Colorer selon la contrainte</span></div>` : ''}
       <label class="f">Seuil de densité ${optTet() ? '(surface tracée à ce niveau)' : 'affiché'} : ${fmt(o.thr, 2)}</label><input type="range" min="0.05" max="0.95" step="0.05" value="${o.thr}" data-set="opt.thr"></div>
       ${!v && !S.busy ? `<div class="chk"><i class="wn"></i><span>${fail ? 'La vérification n\'a pas convergé à ce seuil.' : 'Le seuil a changé : la forme affichée n\'a pas été vérifiée.'}</span></div><button class="btn wide" data-act="verify" style="margin-bottom:8px">Vérifier cette forme</button>` : ''}
+      ${v && o.colorVm ? `<div class="sec">ÉTIQUETTES</div><div class="row"><span><input type="checkbox" data-set="showMaxLabel" ${S.showMaxLabel ? 'checked' : ''}> Étiquette du ${S.tab === 'results' && S.resField === 'fs' ? 'minimum' : 'maximum'}</span></div>
+    <div class="mut small">Clic droit sur la pièce : épingler la valeur du nœud le plus proche. Clic droit sur une étiquette : la retirer.</div>
+    <div class="btns"><button class="btn" data-act="clearlabels" ${nLab() ? '' : 'disabled'}>Effacer les étiquettes (${nLab()})</button></div>` : ''}
       <button class="btn wide" data-act="optstl">Exporter la forme en STL</button><div class="mut small" style="margin-top:10px">La forme obtenue est un guide : redessinez la pièce dans SolidWorks en vous en inspirant, puis revérifiez-la avec une analyse sur maillage fin.${optTet() ? ' Le STL exporté est la surface lisse, fermée : SolidWorks peut l\'importer comme corps graphique ou maillé pour servir de gabarit.' : ''}</div>`;
     }
     return h;
@@ -2619,6 +2711,7 @@ onmessage = async e => {
     defreal: () => { S.defPos = 0; resBuffers(); ui(); }, defauto: () => { S.defPos = null; resBuffers(); ui(); },
     menu: () => $('#viewMenu').classList.toggle('open'), help,
     mesh: () => { if (genMesh()) ui(); }, hfine: () => { S.h = +(S.h / 1.25).toPrecision(3); ui(); }, hcoarse: () => { S.h = +(S.h * 1.25).toPrecision(3); ui(); },
+    clearlabels: () => { S.labels = S.labels.filter(L => S.tab === 'opt' ? L.tab !== 'opt' : L.tab !== 'results'); R.need = true; ui(); },
     addfix: () => addBC('fix'), addpin: () => addBC('pin'), verify: runVerify, adddisp: () => addBC('disp'), addforce: () => addBC('force'), clearsel: () => { S.sel.fill(0); geoColors(); ui(); },
     bc: el => { const id = +el.dataset.id; S.activeBC = S.activeBC === id ? null : id; geoColors(); ui(); },
     bcdel: () => { S.dirty = true; S.bcs = S.bcs.filter(b => b.id !== S.activeBC); S.activeBC = null; S.stale = !!S.res; geoColors(); ui(); },
@@ -2641,7 +2734,7 @@ onmessage = async e => {
     else if (d.optmode) { if (!S.busy) { S.opt.mode = d.optmode; S.dirty = true; ui(); } }
     else if (d.mode) { S.selMode = d.mode; S.hoverSeed = -1; S.hoverMask = null; ui(); }
   });
-  const VIEW_ONLY = new Set(['showEdges', 'showGrid', 'showLabels', 'showDef', 'opt.thr', 'opt.colorVm', 'selTol', 'fsTarget']);
+  const VIEW_ONLY = new Set(['showMaxLabel', 'showEdges', 'showGrid', 'showLabels', 'showDef', 'opt.thr', 'opt.colorVm', 'selTol', 'fsTarget']);
   document.addEventListener('change', e => {
     const el = e.target, p = el.dataset.set; if (!p) return;
     const v = el.type === 'checkbox' ? el.checked : (el.type === 'number' || el.type === 'range' || el.dataset.num) ? parseFloat(el.value) : el.value;
@@ -2685,7 +2778,7 @@ onmessage = async e => {
     <h3>Exporter depuis SolidWorks</h3><p>Fichier › Enregistrer sous › STL (*.stl). Dans Options : unité « Millimètres », résolution « Fine ». Une résolution fine donne des alésages plus ronds et des sélections de faces plus propres.</p>
     <h3>Ce que fait le calcul</h3><ul><li>Statique linéaire élastique, petits déplacements, matériau isotrope.</li><li>Deux maillages au choix : des cubes coupés par la vraie surface (robuste, sert aussi à l'optimisation), ou des tétraèdres à 10 nœuds (plus précis à nombre d'éléments égal). Plus les éléments sont petits, plus le résultat est précis et le calcul long.</li><li>Une force est répartie uniformément sur les faces choisies, ou seulement du côté où l'axe pousse si « Charge de palier » est cochée.</li><li><b>Appui fixe</b> : la face est soudée à un bâti rigide. <b>Axe / boulon</b> : l'alésage n'est retenu que du côté où il s'appuie sur l'axe ; l'axe est supposé rigide et sans jeu, et la matière glisse autour de lui (ou non, avec l'option « Boulon serré »).</li></ul>
     <h3>Limites à garder en tête</h3><ul><li>Pas de contact, de flambage, de fatigue ni de plasticité.</li><li>Les pics de contrainte au bord des appuis fixes et dans les angles rentrants vifs sont souvent numériques : confirmez en affinant.</li><li>Pour une pièce critique pour la sécurité, validez avec un logiciel certifié ou un essai.</li></ul>
-    <h3>Projets</h3><p>Chaque onglet en haut est un projet ; « + » en crée un nouveau. Ouvrir un fichier l'ouvre dans un nouvel onglet. Un point orange signale des modifications non enregistrées. <kbd>Ctrl+S</kbd> : enregistrer (la première fois, choix de l'emplacement) · <kbd>Ctrl+Maj+S</kbd> : enregistrer sous · <kbd>Ctrl+O</kbd> : ouvrir.</p><h3>Souris</h3><p>Clic gauche : tourner · clic droit : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p>
+    <h3>Projets</h3><p>Chaque onglet en haut est un projet ; « + » en crée un nouveau. Ouvrir un fichier l'ouvre dans un nouvel onglet. Un point orange signale des modifications non enregistrées. <kbd>Ctrl+S</kbd> : enregistrer (la première fois, choix de l'emplacement) · <kbd>Ctrl+Maj+S</kbd> : enregistrer sous · <kbd>Ctrl+O</kbd> : ouvrir.</p><h3>Souris</h3><p>Clic gauche : tourner · clic droit glissé : déplacer · molette : zoom · <kbd>Échap</kbd> : vider la sélection.</p><h3>Étiquettes</h3><p>Dans Résultats et Optimisation, une étiquette marque la valeur maximale du champ affiché (le minimum pour le facteur de sécurité). Un clic droit sur la pièce épingle la valeur du nœud le plus proche ; un clic droit sur une étiquette la retire. Les étiquettes suivent la déformée et le champ affiché, et s'estompent quand le point est caché derrière la pièce.</p>
     <div class="btns" style="justify-content:flex-end"><button class="btn primary" data-act="closemodal">Fermer</button></div></div>`;
     $('#modal').classList.add('on');
   }
